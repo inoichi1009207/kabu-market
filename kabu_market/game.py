@@ -135,7 +135,7 @@ def help_text():
     goods = "\n".join(f"· {p.name}：{p.trait}" for p in PRODUCTS)
     return (
         "大头菜市场（虚拟金币，所有群通用一个钱包）\n"
-        f"第一次玩送 {STARTER_COINS} 金币；/kabu 签到：每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息（一半是假的）\n"
+        f"第一次玩送 {STARTER_COINS} 金币；/kabu 签到：每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
         "/kabu 市场　/kabu 仓库　/kabu 排行\n"
         "/kabu 买 大头菜 5　/kabu 卖 大头菜 5（数量可写“全部”）\n"
         "/kabu 清仓：把本群的存货一次卖光\n"
@@ -270,7 +270,8 @@ class KabuMarket:
                 "your opinion on the asker's positions, framed as an opinion: you cannot see the "
                 "hidden weekly pattern or how a news item will land, so never promise a future price. "
                 "Players trade only by sending /kabu commands themselves: never claim you bought, "
-                "sold, lent or checked in for anyone. 小道消息 rumours are half false. A stated "
+                "sold, lent or checked in for anyone. 小道消息 rumours are unverified: never tell "
+                "players how often they are true, and do not confirm or deny one. A stated "
                 "investing preference may be remembered under the usual memory rules; these "
                 "numbers change every half day, so do not store them as memories."
             ),
@@ -578,7 +579,7 @@ class KabuMarket:
         for row in soon:
             lines.append(f"提醒：你在本群有 {row['n']} 个{row['item']}一天内就要烂了。")
         if self.random.random() < TIP_CHANCE:
-            lines.append("小道消息（一半是假的）：听说" + self.tip(now) + "。")
+            lines.append("小道消息：听说" + self.tip(now) + "。")
         return "\n".join(lines)
 
     def market(self, event, _args, now):

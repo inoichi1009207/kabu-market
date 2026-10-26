@@ -407,3 +407,12 @@ def test_knowledge_is_read_only_and_describes_this_chat(market, store, clock):
     facts = market.knowledge(ev(clock, "我该不该卖马铃薯"))
     assert facts["asker"]["goods_in_this_chat"] == {"马铃薯": 3}
     assert "opinion" in facts["note"] and "/kabu" in facts["rules"]
+
+
+def test_rumours_never_tell_players_how_reliable_they_are(market, clock, monkeypatch):
+    monkeypatch.setattr(K, "TIP_CHANCE", 1.0)
+    go(clock, 0)
+    text = market.respond(ev(clock, "/kabu 签到"))
+    assert "小道消息：听说" in text
+    for hint in ("假", "不一定", "真"):
+        assert hint not in text and hint not in K.help_text()
