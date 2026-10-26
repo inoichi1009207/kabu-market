@@ -52,7 +52,7 @@ def choose(kind, rng, others, planters):
         "small": lambda: 5 * SCALE,
         "big": lambda: 30 * SCALE,
         "allin": lambda: min(CAP, 100),  # without a cap, "all in" = 100 seeds (1000 coins)
-        "random": lambda: rng.randint(1, 40 * SCALE) if rng.random() < 0.6 else 0,
+        "random": lambda: min(CAP, rng.randint(1, 40 * SCALE)) if rng.random() < 0.6 else 0,
         "adaptive": lambda: best_response(others, planters),
     }[kind]()
 

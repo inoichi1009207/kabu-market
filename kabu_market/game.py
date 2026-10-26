@@ -18,12 +18,17 @@ from .prices import TZ, PriceEngine, slot_of, week_start
 COMMAND = re.compile(r"/kabu(?:\s+(.*))?", re.S)
 DAY = 86400
 CHECKIN_RANGE = (10, 15)  # coins per Shanghai day, once across all groups
-BUY_STEP, SELL_STEP = 1.002, 0.997  # per unit, applied after a buy / before a sell
+# Each unit bought pushes the price up by IMPACT_STEP and each unit sold divides it back, so
+# buying and selling walk the same curve: no buy/sell order can ever net coins. Selling to
+# the system then pays SELL_SPREAD less, which is what makes any round trip lose.
+IMPACT_STEP, SELL_SPREAD = 1.002, 0.03
 IMPACT_HALF_LIFE = 6 * 3600
 IMPACT_BOUNDS = (0.1, 10.0)
 MAX_UNITS = 9999
 LOAN_RATE = 0.01  # daily, compounded per Shanghai day
-LEVERAGE = 4.0  # total position / net assets; debt may reach (LEVERAGE - 1) × net assets
+LEVERAGE = (
+    4.0  # total position / net assets; debt may reach (LEVERAGE - 1) × net assets
+)
 MARGIN = 0.2  # forced sale when net worth < MARGIN × debt
 TRADE_FEE = 0.05  # paid by the seller, removed from circulation
 TRADE_BAND = (0.5, 2.0)  # unit price relative to the current market price
@@ -44,7 +49,9 @@ STREAK_BONUS = (7, 30)  # every 7th consecutive check-in day adds 30 coins
 # only depends on total / depth, so it is the same game with finer steps; the seed is
 # rounded down to 2 coins). PLANT_CAP is per person per period in one group.
 SEED_COST, PLANT_CAP = 2, 100
-PLANT_CLOSE_WINDOW = 2 * 3600  # planting stops at a random moment this long before harvest
+PLANT_CLOSE_WINDOW = (
+    2 * 3600
+)  # planting stops at a random moment this long before harvest
 HARVEST_DAYS, HARVEST_K, HARVEST_DEPTH, HARVEST_FULL_STAKE = 3, 1.8, 120, 20
 HARVEST_EPOCH = datetime(2026, 1, 1, 20, 0, tzinfo=TZ).timestamp()
 POTATO = "马铃薯"
@@ -219,7 +226,9 @@ class KabuMarket:
                     "salt": secrets.token_hex(16),
                     "start_day": self.day(self.clock.now()),
                 }
-                if self.store.db.in_transaction:  # e.g. first price read in a margin call
+                if (
+                    self.store.db.in_transaction
+                ):  # e.g. first price read in a margin call
                     self.store.put(SEED_KEY, seed, self.clock.now())
                 else:
                     with self.store.transaction():
@@ -255,20 +264,21 @@ class KabuMarket:
         total = 0.0
         for _ in range(units):
             total += price * impact
-            impact = min(IMPACT_BOUNDS[1], impact * BUY_STEP)
+            impact = min(IMPACT_BOUNDS[1], impact * IMPACT_STEP)
         return math.ceil(total - 1e-9), impact
 
     @staticmethod
     def sell_income(price, impact, units):
-        """Each unit first pushes the price down, then is paid at that price.
+        """Each unit first pulls the price back one step, then is paid at that price.
 
-        Paying after the drop makes an immediate buy-then-sell round trip always lose.
+        That is exactly the price the last unit bought was paid at, so the curve alone is
+        reversible both ways (sell-then-buy cannot mint coins); the spread makes it a loss.
         """
         total = 0.0
         for _ in range(units):
-            impact = max(IMPACT_BOUNDS[0], impact * SELL_STEP)
+            impact = max(IMPACT_BOUNDS[0], impact / IMPACT_STEP)
             total += price * impact
-        return math.floor(total + 1e-9), impact
+        return math.floor(total * (1 - SELL_SPREAD) + 1e-9), impact
 
     # -- accounts -----------------------------------------------------------------
 
@@ -300,7 +310,8 @@ class KabuMarket:
         now = self.clock.now()
         key = event.scope.key
         prices = {
-            p.name: round(self.price(p, now) * self.impact(key, p.name, now), 2) for p in PRODUCTS
+            p.name: round(self.price(p, now) * self.impact(key, p.name, now), 2)
+            for p in PRODUCTS
         }
         day = self.day(now)
         news = [
@@ -341,7 +352,9 @@ class KabuMarket:
                 "debt": acct["debt"],
                 "net_assets": math.floor(self.net_worth(acct, now)),
                 "goods": here,
-                "potatoes_planted_unharvested": self._planted(event.scope.bot_id, event.sender),
+                "potatoes_planted_unharvested": self._planted(
+                    event.scope.bot_id, event.sender
+                ),
                 "checkin_streak": acct["streak"],
             }
         return facts
@@ -388,10 +401,24 @@ class KabuMarket:
         value = acct["coins"] - acct["debt"]
         for lot in self._stock(acct["bot_id"], acct["user_id"]):
             product = self.products.get(lot["item"])
-            if product is None or (lot["expires_at"] is not None and lot["expires_at"] <= now):
+            if product is None or (
+                lot["expires_at"] is not None and lot["expires_at"] <= now
+            ):
                 continue
             value += self.price(product, now) * lot["quantity"]
+        # goods waiting in an open offer are still the seller's until someone accepts
+        for offer in self._offers_by(acct["bot_id"], acct["user_id"]):
+            product = self.products.get(offer["item"])
+            if product is not None:
+                for lot in json.loads(offer["lots"]):
+                    if lot["expires_at"] is None or lot["expires_at"] > now:
+                        value += self.price(product, now) * lot["quantity"]
         return value + SEED_COST * self._planted(acct["bot_id"], acct["user_id"])
+
+    def _offers_by(self, bot, seller):
+        return self.store.db.execute(
+            "SELECT * FROM kabu_offers WHERE bot_id=? AND seller=?", (bot, seller)
+        ).fetchall()
 
     def _take(self, bot, user, scope_key, item, units, now):
         """Inside a transaction: remove ``units`` oldest-first; return the taken lots."""
@@ -466,7 +493,9 @@ class KabuMarket:
             for offer in expired:
                 lots = json.loads(offer["lots"])
                 self._put(bot, offer["seller"], offer["scope_key"], offer["item"], lots)
-                self.store.db.execute("DELETE FROM kabu_offers WHERE id=?", (offer["id"],))
+                self.store.db.execute(
+                    "DELETE FROM kabu_offers WHERE id=?", (offer["id"],)
+                )
             self._harvest(bot, now)
             debtors = self.store.db.execute(
                 "SELECT user_id FROM kabu_accounts WHERE bot_id=? AND debt>0", (bot,)
@@ -474,17 +503,33 @@ class KabuMarket:
             for row in debtors:
                 acct = self.account(bot, row["user_id"], now)
                 self._rot(bot, acct["user_id"], now)
-                if self.net_worth(acct, now) < MARGIN * acct["debt"]:
+                # With no goods left there is nothing to sell: coins kept from check-ins
+                # stay usable, as the forced-sale notice promises.
+                holds = self._stock(bot, acct["user_id"]) or self._offers_by(
+                    bot, acct["user_id"]
+                )
+                if holds and self.net_worth(acct, now) < MARGIN * acct["debt"]:
                     self._liquidate(acct, now)
                 self.save(acct)
 
     def _liquidate(self, acct, now):
+        for offer in self._offers_by(acct["bot_id"], acct["user_id"]):
+            self._put(
+                acct["bot_id"],
+                offer["seller"],
+                offer["scope_key"],
+                offer["item"],
+                json.loads(offer["lots"]),
+            )
+            self.store.db.execute("DELETE FROM kabu_offers WHERE id=?", (offer["id"],))
         income = 0
         for lot in self._stock(acct["bot_id"], acct["user_id"]):
             product = self.products.get(lot["item"])
             if product is not None:
                 impact = self.impact(lot["scope_key"], lot["item"], now)
-                got, after = self.sell_income(self.price(product, now), impact, lot["quantity"])
+                got, after = self.sell_income(
+                    self.price(product, now), impact, lot["quantity"]
+                )
                 income += got
                 self._set_impact(lot["scope_key"], lot["item"], after, now)
             self.store.db.execute("DELETE FROM kabu_stock WHERE id=?", (lot["id"],))
@@ -497,7 +542,9 @@ class KabuMarket:
             if acct["debt"]
             else "债务已还清。"
         )
-        self._notify(acct, f"你资不抵债，被强制平仓：存货卖得 {income} 金币，还债 {paid}，{rest}")
+        self._notify(
+            acct, f"你资不抵债，被强制平仓：存货卖得 {income} 金币，还债 {paid}，{rest}"
+        )
 
     @staticmethod
     def _notify(acct, text):
@@ -524,7 +571,9 @@ class KabuMarket:
         Plant commands are public in a group, so a fixed deadline would reward whoever
         waits to see everyone else's numbers. A random, unannounced close removes that.
         """
-        offset = self.engine.rng("close", scope_key, period).uniform(0, PLANT_CLOSE_WINDOW)
+        offset = self.engine.rng("close", scope_key, period).uniform(
+            0, PLANT_CLOSE_WINDOW
+        )
         return self.harvest_at(period) - offset
 
     def _planted(self, bot, user):
@@ -738,7 +787,9 @@ class KabuMarket:
             return f"马铃薯不在市场买卖，改成种了：/kabu plant 10（种薯 {SEED_COST} 金币一个）"
         if item is None:
             names = "、".join(f"{name} {code}" for code, name in ITEM_CODES.items())
-            return f"没有这种商品。可以买卖：{names}。" if word else "用法：/kabu buy d 5"
+            return (
+                f"没有这种商品。可以买卖：{names}。" if word else "用法：/kabu buy d 5"
+            )
         if amount.lower() in ALL_WORDS:
             return item, None
         units = int(amount)
@@ -854,9 +905,13 @@ class KabuMarket:
         for product in PRODUCTS:
             impact = self.impact(event.scope.key, product.name, now)
             quote = self.price(product, now) * impact
-            lines.append(f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个")
+            lines.append(
+                f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个"
+            )
         public = self.potato_public(event.scope.key, now)
-        potato = f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获"
+        potato = (
+            f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获"
+        )
         last = public.get("last_harvest")
         if last:
             potato += f"；上期本群共种 {last['total_planted']} 个，每个卖 {fmt(last['price_each'])}"
@@ -899,7 +954,9 @@ class KabuMarket:
             (bot, user),
         ).fetchall()
         for row in planted:
-            text += f"\n地里有 {row['n']} 个土豆，{self.harvest_label(row['period'])}收获。"
+            text += (
+                f"\n地里有 {row['n']} 个土豆，{self.harvest_label(row['period'])}收获。"
+            )
         if rotten:
             gone = "、".join(f"{n} 个{i}" for i, n in rotten.items())
             text += f"\n刚刚烂掉：{gone}。"
@@ -929,7 +986,9 @@ class KabuMarket:
             acct["coins"] -= cost
             self.save(acct)
             self._set_impact(key, item, after, now)
-            expires = now + TURNIP_SHELF_DAYS * DAY if product.kind == "turnip" else None
+            expires = (
+                now + TURNIP_SHELF_DAYS * DAY if product.kind == "turnip" else None
+            )
             lot = {"quantity": units, "bought_at": now, "expires_at": expires}
             self._put(bot, user, key, item, [lot])
         tail = f"，{TURNIP_SHELF_DAYS} 天后烂掉" if product.kind == "turnip" else ""
@@ -1124,5 +1183,7 @@ class KabuMarket:
                 worth = math.floor(self.net_worth(acct, now))
                 rows.append((worth, player["name"] or "某位群友"))
         rows.sort(reverse=True)
-        lines = [f"{i}. {name}：{worth}" for i, (worth, name) in enumerate(rows[:10], 1)]
+        lines = [
+            f"{i}. {name}：{worth}" for i, (worth, name) in enumerate(rows[:10], 1)
+        ]
         return "本群净资产排行（所有群合计，已扣欠款）：\n" + "\n".join(lines)
