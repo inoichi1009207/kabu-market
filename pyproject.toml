@@ -1,0 +1,23 @@
+[project]
+name = "kabu-market"
+version = "1.0.0"
+description = "A chat-group market mini-game with virtual coins: weekly hidden trends, news-driven prices, leverage and player trades."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+# only for tools/fit_kline.py
+analysis = ["numpy", "scipy", "arch"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["kabu_market"]
+
+[tool.ruff]
+line-length = 100
