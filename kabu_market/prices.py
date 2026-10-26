@@ -38,11 +38,13 @@ NEWS_DOWN = (
 )
 # Row = last week's pattern, column = this week's. Same idea as the turnip market,
 # our own numbers: a pattern rarely repeats, and a bad week makes a spike likely.
+# Large spikes are deliberately rare: with a 14-day shelf life, holding for a spike
+# must stay a gamble, not a sure win (see the economy simulation).
 TRANSITIONS = (
-    (0.25, 0.25, 0.15, 0.35),
-    (0.45, 0.05, 0.25, 0.25),
-    (0.25, 0.40, 0.10, 0.25),
-    (0.40, 0.25, 0.15, 0.20),
+    (0.29, 0.125, 0.175, 0.41),
+    (0.46, 0.025, 0.2575, 0.2575),
+    (0.335, 0.20, 0.13, 0.335),
+    (0.465, 0.125, 0.175, 0.235),
 )
 
 
@@ -113,7 +115,7 @@ class PriceEngine:
             k = len(self._patterns)
             draw = self.rng("pattern", k).random()
             if k == 0:
-                row = (0.35, 0.25, 0.15, 0.25)
+                row = (0.41, 0.125, 0.175, 0.29)
             else:
                 row = TRANSITIONS[self._patterns[-1]]
             total, choice = 0.0, len(row) - 1

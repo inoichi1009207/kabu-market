@@ -45,9 +45,8 @@ def give(market, amount, user="u1"):
         market.save(a)
 
 
-def held(market, item, user="u1", peer=GROUP):
-    key = Scope("bot", "group", peer).key
-    return sum(r["quantity"] for r in market._stock("bot", user, key, item))
+def held(market, item, user="u1"):
+    return sum(r["quantity"] for r in market._stock("bot", user, item=item))
 
 
 # -- check-in ---------------------------------------------------------------------
@@ -70,22 +69,35 @@ def test_checkin_once_a_day_across_all_groups_with_streak(market, clock):
         assert "已连签 1 天" in market.respond(ev(clock, "/kabu 签到"))
 
 
-def test_wallet_is_shared_but_goods_stay_in_their_group(market, clock):
+def test_wallet_and_goods_follow_the_player_across_groups(market, clock):
     go(clock, 6)
     give(market, 1000)
-    market.respond(ev(clock, "/kabu 买 大头菜 3"))
-    assert held(market, "大头菜") == 3 and held(market, "大头菜", peer=OTHER) == 0
+    market.respond(ev(clock, "/kabu buy d 3"))
     spent = 1000 - acct(market)["coins"]
     assert spent > 0
-    assert f"金币 {1000 - spent}" in market.respond(ev(clock, "/kabu 仓库", peer=OTHER))
+    text = market.respond(ev(clock, "/kabu bag", peer=OTHER))
+    assert f"金币 {1000 - spent}" in text and "3 个大头菜" in text
+
+
+def test_buy_in_one_group_sell_in_another_at_that_groups_price(market, clock):
+    """Cross-group arbitrage is a promise in the docs: it must actually work."""
     go(clock, 1)
-    assert "没有可卖" in market.respond(ev(clock, "/kabu 卖 大头菜 1", peer=OTHER))
+    give(market, 100_000)
+    give(market, 100_000, "whale")
+    key, other = Scope("bot", "group", GROUP).key, Scope("bot", "group", OTHER).key
+    market.respond(ev(clock, "/kabu buy m 200", sender="whale", peer=OTHER))  # pumps OTHER
+    assert market.impact(other, "马铃薯", clock.now()) > market.impact(key, "马铃薯", clock.now())
+    market.respond(ev(clock, "/kabu buy m 10"))  # cheap here
+    pumped = market.impact(other, "马铃薯", clock.now())
+    text = market.respond(ev(clock, "/kabu sell m 10", peer=OTHER))  # sell into the pumped group
+    assert "卖出 10 个马铃薯" in text and held(market, "马铃薯") == 0
+    assert market.impact(other, "马铃薯", clock.now()) < pumped  # the arbitrage closes the gap
 
 
 # -- turnip rhythm and rot ----------------------------------------------------------
 
 
-def test_turnips_trade_every_day_and_rot_after_seven_days(market, clock):
+def test_turnips_trade_every_day_and_rot_after_14_days(market, clock):
     give(market, 1000)
     go(clock, 2, hour=10)  # Wednesday: buy and sell on a weekday
     assert "买了 2 个大头菜" in market.respond(ev(clock, "/kabu 买 大头菜 2"))
@@ -93,7 +105,7 @@ def test_turnips_trade_every_day_and_rot_after_seven_days(market, clock):
     go(clock, 6, hour=10)  # Sunday: buying works too
     assert "买了 2 个大头菜" in market.respond(ev(clock, "/kabu 买 大头菜 2"))
     assert held(market, "大头菜") == 3
-    clock.advance(3 * K.DAY + 3600)  # past the Wednesday lot's 7 days, not Sunday's
+    clock.advance(10 * K.DAY + 3600)  # past the Wednesday lot's 14 days, not Sunday's
     assert "刚刚烂掉：1 个大头菜" in market.respond(ev(clock, "/kabu 仓库"))
     assert held(market, "大头菜") == 2
 
@@ -405,7 +417,7 @@ def test_knowledge_is_read_only_and_describes_this_chat(market, store, clock):
     give(market, 500)
     market.respond(ev(clock, "/kabu 买 马铃薯 3"))
     facts = market.knowledge(ev(clock, "我该不该卖马铃薯"))
-    assert facts["asker"]["goods_in_this_chat"] == {"马铃薯": 3}
+    assert facts["asker"]["goods"] == {"马铃薯": 3}
     assert "opinion" in facts["note"] and "/kabu" in facts["rules"]
 
 
@@ -444,6 +456,15 @@ def test_short_ascii_commands_and_item_codes(market, clock):
     assert "已撤回" in market.respond(ev(clock, "/kabu cancel 2"))
     assert "本群净资产排行" in market.respond(ev(clock, "/kabu rank"))
     assert "卖出" in market.respond(ev(clock, "/kabu dump"))
-    help_text = market.respond(ev(clock, "/kabu"))
+    help_text = market.respond(ev(clock, "/kabu help"))
     assert "/kabu sign" in help_text and "/kabu buy d 5" in help_text
+    assert "大头菜（d）" in market.respond(ev(clock, "/kabu market"))
+
+
+def test_bare_kabu_is_a_short_card_not_the_full_rules(market, clock):
+    text = market.respond(ev(clock, "/kabu", sender="newbie"))
+    assert "送你 100 金币" in text and "你有 100 金币" in text
+    assert "大头菜(d)" in text and "/kabu help" in text
+    assert len(text.splitlines()) <= 4  # welcome + three-line card
+    assert "强制平仓" not in text  # the full rules live in /kabu help
     assert "没有这种商品" in market.respond(ev(clock, "/kabu buy q 1"))

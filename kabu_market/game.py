@@ -30,7 +30,7 @@ OFFER_TTL = 1800
 TIP_CHANCE, TIP_TRUTH = 0.2, 0.5
 STARTER_COINS = 100  # once per person (all groups), on the first /kabu
 SEED_KEY = "kabu_seed_v2"
-TURNIP_SHELF_DAYS = 7
+TURNIP_SHELF_DAYS = 14
 STREAK_BONUS = (7, 30)  # every 7th consecutive check-in day adds 30 coins
 BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
 ALL_WORDS = {"all", "全部"}
@@ -57,7 +57,7 @@ PRODUCTS = (
         "大头菜",
         20.0,
         "turnip",
-        "每周走势不同（这周冲高还是一路跌要自己看）；每天都能买卖，买入 7 天后烂掉",
+        "每周走势不同（这周冲高还是一路跌要自己看）；每天都能买卖，买入 14 天后烂掉",
     ),
     Product(
         "西红柿",
@@ -144,11 +144,11 @@ def help_text():
         "大头菜市场（虚拟金币，所有群通用一个钱包）\n"
         f"第一次玩送 {STARTER_COINS} 金币。商品代号：大头菜 d、西红柿 x、马铃薯 m\n"
         f"/kabu sign：签到，每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
-        "/kabu mkt 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
+        "/kabu market 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
         "/kabu buy d 5　/kabu sell d 5（数量可写 all）　/kabu dump 清仓\n"
         "/kabu loan 500　/kabu repay 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
         "/kabu offer @群友 d 5 25：向群友报价（单价 25），对方 /kabu ok 编号 成交，/kabu cancel 编号 撤回；卖方付 5% 手续费\n"
-        "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。\n"
+        "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。货物跟着你走，在哪个群都能卖。\n"
         "商品：\n" + goods
     )
 
@@ -293,13 +293,13 @@ class KabuMarket:
         if row is not None:
             acct = self._accrue(dict(row), now)
             here = {}
-            for lot in self._stock(event.scope.bot_id, event.sender, key):
+            for lot in self._stock(event.scope.bot_id, event.sender):
                 here[lot["item"]] = here.get(lot["item"], 0) + lot["quantity"]
             facts["asker"] = {
                 "coins": acct["coins"],
                 "debt": acct["debt"],
                 "net_assets": math.floor(self.net_worth(acct, now)),
-                "goods_in_this_chat": here,
+                "goods": here,
                 "checkin_streak": acct["streak"],
             }
         return facts
@@ -463,10 +463,11 @@ class KabuMarket:
         self.maintain(event, now)
         match = COMMAND.fullmatch(event.text.strip())
         args = (match.group(1) or "").split() if match else []
-        sub = args[0].lower() if args else "help"
+        sub = args[0].lower() if args else "card"
         handlers = {
             "sign": self.checkin,
             "mkt": self.market,
+            "m": self.market,
             "market": self.market,
             "bag": self.inventory,
             "rank": self.ranking,
@@ -495,7 +496,9 @@ class KabuMarket:
             "接受": self.accept,
             "撤回": self.withdraw,
         }
-        if sub in {"help", "h", "帮助", "玩法"}:
+        if sub == "card":
+            text = self.card(event, now)
+        elif sub in {"help", "h", "帮助", "玩法"}:
             text = help_text()
         elif sub in handlers:
             text = handlers[sub](event, args[1:], now)
@@ -592,8 +595,8 @@ class KabuMarket:
             acct["checkin_day"] = today
             self.save(acct)
             soon = self.store.db.execute(
-                "SELECT item, sum(quantity) AS n FROM kabu_stock WHERE bot_id=? AND user_id=? AND scope_key=? AND expires_at IS NOT NULL AND expires_at>? AND expires_at<=? GROUP BY item",
-                (bot, user, event.scope.key, now, now + DAY),
+                "SELECT item, sum(quantity) AS n FROM kabu_stock WHERE bot_id=? AND user_id=? AND expires_at IS NOT NULL AND expires_at>? AND expires_at<=? GROUP BY item",
+                (bot, user, now, now + DAY),
             ).fetchall()
         head = f"签到成功，获得 {gained} 金币"
         if bonus:
@@ -603,10 +606,25 @@ class KabuMarket:
         head += f"，现在共有 {acct['coins']} 金币，已连签 {acct['streak']} 天。"
         lines.insert(0, head)
         for row in soon:
-            lines.append(f"提醒：你在本群有 {row['n']} 个{row['item']}一天内就要烂了。")
+            lines.append(f"提醒：你有 {row['n']} 个{row['item']}一天内就要烂了。")
         if self.random.random() < TIP_CHANCE:
             lines.append("小道消息：听说" + self.tip(now) + "。")
         return "\n".join(lines)
+
+    def card(self, event, now):
+        """What a bare /kabu shows: coins, prices here, the commonest commands."""
+        with self.store.transaction():
+            coins = self.account(event.scope.bot_id, event.sender, now)["coins"]
+        prices = "　".join(
+            f"{p.name}({code_of(p.name)}) "
+            + fmt(self.price(p, now) * self.impact(event.scope.key, p.name, now))
+            for p in PRODUCTS
+        )
+        return (
+            f"你有 {coins} 金币｜{prices}\n"
+            "常用：/kabu sign 签到 · buy d 5 · sell d 5 · bag 仓库 · market 行情\n"
+            "发 /kabu help 看全部玩法"
+        )
 
     def market(self, event, _args, now):
         _day, half = slot_of(now)
@@ -633,21 +651,21 @@ class KabuMarket:
             rotten = self._rot(bot, user, now)
             acct = self.account(bot, user, now)
             self.save(acct)
-            lots = self._stock(bot, user, event.scope.key)
+            lots = self._stock(bot, user)
             worth = self.net_worth(acct, now)
         text = f"金币 {acct['coins']}"
         if acct["debt"]:
             text += f"，欠款 {acct['debt']}（日息 1%）"
         text += f"，净资产 {math.floor(worth)}（所有群合计，已扣欠款）。"
         if lots:
-            text += "\n本群存货："
+            text += "\n存货（跟着你走，在哪个群都能卖）："
             for lot in lots:
                 line = f"\n{lot['quantity']} 个{lot['item']}"
                 if lot["expires_at"] is not None:
                     line += f"，{time_left(lot['expires_at'] - now)}烂掉"
                 text += line
         else:
-            text += "\n本群没有存货。"
+            text += "\n没有存货。"
         if rotten:
             gone = "、".join(f"{n} 个{i}" for i, n in rotten.items())
             text += f"\n刚刚烂掉：{gone}。"
@@ -692,13 +710,13 @@ class KabuMarket:
         bot, user, key = event.scope.bot_id, event.sender, event.scope.key
         with self.store.transaction():
             self._rot(bot, user, now)
-            held = sum(lot["quantity"] for lot in self._stock(bot, user, key, item))
+            held = sum(lot["quantity"] for lot in self._stock(bot, user, item=item))
             if held == 0:
-                return f"你在本群没有可卖的{item}。"
+                return f"你没有可卖的{item}。"
             units = min(held, MAX_UNITS) if units is None else units
             if units > held:
-                return f"你在本群只有 {held} 个{item}。"
-            self._take(bot, user, key, item, units, now)
+                return f"你只有 {held} 个{item}。"
+            self._take(bot, user, None, item, units, now)
             impact = self.impact(key, item, now)
             income, after = self.sell_income(price, impact, units)
             acct = self.account(bot, user, now)
@@ -711,13 +729,13 @@ class KabuMarket:
         )
 
     def clear_out(self, event, _args, now):
-        """Sell everything sellable in this group right now, one line per good."""
-        bot, user, key = event.scope.bot_id, event.sender, event.scope.key
+        """Sell everything the player holds at this group's prices, one line per good."""
+        bot, user = event.scope.bot_id, event.sender
         with self.store.transaction():
             self._rot(bot, user, now)
-            goods = [p.name for p in PRODUCTS if self._stock(bot, user, key, p.name)]
+            goods = [p.name for p in PRODUCTS if self._stock(bot, user, item=p.name)]
         if not goods:
-            return "你在本群没有存货。"
+            return "你没有存货。"
         return "\n".join(self.sell(event, item, None, now) for item in goods)
 
     def borrow(self, event, args, now):
@@ -791,10 +809,10 @@ class KabuMarket:
             return f"单价要在现价的 50%–200% 之间，也就是 {low}–{high}。"
         with self.store.transaction():
             self._rot(bot, seller, now)
-            held = sum(lot["quantity"] for lot in self._stock(bot, seller, key, item))
+            held = sum(lot["quantity"] for lot in self._stock(bot, seller, item=item))
             if units > held:
-                return f"你在本群只有 {held} 个{item}。"
-            lots = self._take(bot, seller, key, item, units, now)
+                return f"你只有 {held} 个{item}。"
+            lots = self._take(bot, seller, None, item, units, now)
             cur = self.store.db.execute(
                 "INSERT INTO kabu_offers(scope_key,bot_id,seller,buyer,item,quantity,unit_price,lots,expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
