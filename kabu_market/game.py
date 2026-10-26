@@ -977,8 +977,7 @@ class KabuMarket:
         public = self.potato_public(event.scope.key, now)
         potato = (
             f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获；"
-            f"这期已有 {public['players_this_period']} 人在本群玩，"
-            f"需求 D 目前是 {self.harvest_demand(public['players_this_period'])}"
+            f"这期已有 {public['players_this_period']} 人在本群玩，玩的人越多土豆卖得越贵"
         )
         last = public.get("last_harvest")
         if last:

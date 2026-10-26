@@ -8,7 +8,7 @@ import pytest
 
 from kabu_market import game as K
 from kabu_market import Event, KabuMarket, Scope
-from kabu_market.prices import TZ, PriceEngine, slot_of, week_start
+from kabu_market.prices import PATTERN_NAMES, TZ, PriceEngine, slot_of, week_start
 
 GROUP, OTHER = "30005", "30006"
 
@@ -643,7 +643,7 @@ def test_demand_counts_players_of_this_period_not_seeds_planted(market, clock):
     for seeds, user in ((20, "u1"), (5, "u2")):
         market.respond(ev(clock, f"/kabu plant {seeds}", sender=user))
     assert market.active_players(key, period) == 3
-    assert f"需求 D 目前是 {K.HARVEST_PER_PLAYER * 3}" in market.respond(
+    assert "这期已有 3 人在本群玩，玩的人越多土豆卖得越贵" in market.respond(
         ev(clock, "/kabu market", sender="u3")
     )
     # splitting one stake over more planters adds no demand by itself
