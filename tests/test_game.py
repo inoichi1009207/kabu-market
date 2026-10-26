@@ -266,7 +266,7 @@ def test_several_loans_until_debt_equals_net_assets(market, clock):
         assert "还能接着借" in market.respond(ev(clock, "/kabu 借 600"))
     assert acct(market)["debt"] == 1800
     assert "最多再借 0" in market.respond(ev(clock, "/kabu 借 1"))
-    assert "身家 600" in market.respond(ev(clock, "/kabu 仓库"))
+    assert "净资产 600" in market.respond(ev(clock, "/kabu 仓库"))
 
 
 def test_margin_call_liquidates_and_checkin_repays_half(market, clock):
@@ -281,9 +281,9 @@ def test_margin_call_liquidates_and_checkin_repays_half(market, clock):
     text = market.respond(
         ev(clock, "/kabu 仓库", sender="u2")
     )  # anyone's command runs margin calls
-    assert "卖掉了你的货" not in text
+    assert "强制平仓" not in text
     assert held(market, "西红柿") == 0
-    assert "卖掉了你的货" in market.respond(ev(clock, "/kabu 仓库"))
+    assert "强制平仓" in market.respond(ev(clock, "/kabu 仓库"))
     debt = acct(market)["debt"]
     clock.advance(K.DAY)
     debt = acct(market)["debt"]
@@ -310,13 +310,13 @@ def test_goods_in_an_open_offer_still_count_and_are_sold_in_a_margin_call(
     market.respond(ev(clock, f"/kabu 卖给 西红柿 {n} 单价 {unit}", mentions=["u2"]))
     assert held(market, "西红柿") == 0
     assert market.net_worth(acct(market), clock.now()) == pytest.approx(worth)
-    assert "卖掉了你的货" not in market.respond(ev(clock, "/kabu 仓库", sender="u2"))
+    assert "强制平仓" not in market.respond(ev(clock, "/kabu 仓库", sender="u2"))
     with market.store.transaction():
         a = market.account("bot", "u1", clock.now())
         a["debt"] = 5000
         market.save(a)
     market.respond(ev(clock, "/kabu 仓库", sender="u2"))
-    assert "卖掉了你的货" in market.respond(ev(clock, "/kabu 仓库"))
+    assert "强制平仓" in market.respond(ev(clock, "/kabu 仓库"))
     assert not market._offers_by("bot", "u1") and held(market, "西红柿") == 0
     assert "没有" in market.respond(ev(clock, "/kabu 接受 1", sender="u2"))
 
@@ -472,7 +472,7 @@ def test_short_ascii_commands_and_item_codes(market, clock):
         )
     )
     assert "已撤回" in market.respond(ev(clock, "/kabu cancel 2"))
-    assert "本群身家排行" in market.respond(ev(clock, "/kabu rank"))
+    assert "本群净资产排行" in market.respond(ev(clock, "/kabu rank"))
     assert "卖出" in market.respond(ev(clock, "/kabu dump"))
     help_text = market.respond(ev(clock, "/kabu help"))
     assert "/kabu sign" in help_text and "/kabu buy d 5" in help_text
@@ -484,7 +484,7 @@ def test_bare_kabu_is_a_short_card_not_the_full_rules(market, clock):
     assert "送你 100 金币" in text and "你有 100 金币" in text
     assert "大头菜(d)" in text and "/kabu help" in text
     assert len(text.splitlines()) <= 4  # welcome + three-line card
-    assert "卖掉了你的货" not in text  # the full rules live in /kabu help
+    assert "强制平仓" not in text  # the full rules live in /kabu help
     assert "没有这种商品" in market.respond(ev(clock, "/kabu buy q 1"))
 
 
@@ -560,6 +560,12 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
     text = market.respond(ev(clock, "/kabu bag", sender="u1"))
     assert "土豆收获了：本群这期一共种了 64 个（2 人）" in text
     assert f"最高 {K.fmt(max(mine.values()))}、最低 {K.fmt(min(mine.values()))}" in text
+    assert K.weather_word(weather) in text and "系数" not in text  # no formula detail
+    assert [K.weather_word(w) for w in (1.3, 1.0, 0.7)] == [
+        "这期天气好",
+        "这期天气一般",
+        "这期天气差",
+    ]
     assert acct(market, "u1")["coins"] == 1000 - 40 * K.SEED_COST + math.floor(
         40 * mine["u1"] + 0.5
     )
@@ -604,7 +610,7 @@ def test_planted_seeds_count_in_net_worth(market, clock):
     plant_time(market, clock)
     give(market, 300)
     market.respond(ev(clock, "/kabu plant 10"))
-    assert "身家 300" in market.respond(ev(clock, "/kabu bag"))
+    assert "净资产 300" in market.respond(ev(clock, "/kabu bag"))
 
 
 def test_tips_cover_every_good_and_are_half_false(market, clock):
