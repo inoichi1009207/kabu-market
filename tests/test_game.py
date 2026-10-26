@@ -474,8 +474,8 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
     period = plant_time(market, clock)
     give(market, 1000, "u1")
     give(market, 1000, "u2")
-    market.respond(ev(clock, "/kabu plant 10", sender="u1"))
-    market.respond(ev(clock, "/kabu plant 6", sender="u2"))
+    market.respond(ev(clock, "/kabu plant 40", sender="u1"))
+    market.respond(ev(clock, "/kabu plant 24", sender="u2"))
     key = Scope("bot", "group", GROUP).key
     # nobody can see this period's total before the harvest
     assert "共种" not in market.respond(ev(clock, "/kabu market", sender="u3"))
@@ -485,15 +485,16 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
         "next_harvest",
     }  # no running total, no last harvest yet
     to_harvest(market, clock, period)
-    price, weather = market.harvest_price(key, period, 16, 2)
-    depth = K.HARVEST_DEPTH * 2  # both planters staked at least HARVEST_MIN_STAKE
-    expected = K.SEED_COST * K.HARVEST_K * depth / (depth + 16) * weather
+    depth = market.harvest_demand([40, 24])
+    assert depth == K.HARVEST_DEPTH * 2  # both planted at least HARVEST_FULL_STAKE
+    price, weather = market.harvest_price(key, period, 64, depth)
+    expected = K.SEED_COST * K.HARVEST_K * depth / (depth + 64) * weather
     assert price == pytest.approx(expected)
     text = market.respond(ev(clock, "/kabu bag", sender="u1"))
-    assert "土豆收获了：本群这期一共种了 16 个（2 人）" in text
-    assert acct(market, "u1")["coins"] == 900 + math.floor(10 * price)
-    assert acct(market, "u2")["coins"] == 940 + math.floor(6 * price)
-    assert "上期本群共种 16 个" in market.respond(ev(clock, "/kabu market"))
+    assert "土豆收获了：本群这期一共种了 64 个（2 人）" in text
+    assert acct(market, "u1")["coins"] == 1000 - 40 * K.SEED_COST + math.floor(40 * price)
+    assert acct(market, "u2")["coins"] == 1000 - 24 * K.SEED_COST + math.floor(24 * price)
+    assert "上期本群共种 64 个" in market.respond(ev(clock, "/kabu market"))
     assert "收获了" not in market.respond(ev(clock, "/kabu bag", sender="u1"))  # told once
 
 
@@ -542,3 +543,12 @@ def test_tips_cover_every_good_and_are_half_false(market, clock):
         if "西红柿" in text:
             hits.append(("要涨" in text) == rising)
     assert 0.4 < sum(hits) / len(hits) < 0.6
+
+
+def test_every_planter_adds_demand_in_proportion_to_what_they_planted():
+    full = K.HARVEST_DEPTH
+    assert KabuMarket.harvest_demand([1]) == pytest.approx(full / K.HARVEST_FULL_STAKE)
+    assert KabuMarket.harvest_demand([K.HARVEST_FULL_STAKE]) == pytest.approx(full)
+    assert KabuMarket.harvest_demand([100]) == pytest.approx(full)  # capped per planter
+    # a one-seed tester counts, but an alt planting one seed buys only a sliver of demand
+    assert KabuMarket.harvest_demand([30, 1]) == pytest.approx(full + full / K.HARVEST_FULL_STAKE)

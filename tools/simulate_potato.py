@@ -12,10 +12,12 @@ import statistics
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
-COST, PERIODS = 10, 200
-CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 25
+COST, PERIODS = 2, 200
+SCALE = 4  # fixed strategies scale with the cap (game is shipped x4 of the 10/25 design)
+MIN_STAKE = 5 * SCALE
+CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 100
 K = float(sys.argv[1]) if len(sys.argv) > 1 else 1.8
-DEPTH = float(sys.argv[2]) if len(sys.argv) > 2 else 30.0
+DEPTH = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
 
 
 def weather(rng):
@@ -25,10 +27,11 @@ def weather(rng):
 FIXED = "--fixed" in sys.argv
 
 
-def price(total, planters, w):
+def price(total, planters, w, depth=None):
     if planters < 2:
         return COST  # fewer than two planters: refund
-    depth = DEPTH if FIXED else DEPTH * planters
+    if depth is None:  # a player's belief: everyone else planted a full stake
+        depth = DEPTH if FIXED else DEPTH * planters
     return COST * K * depth / (depth + total) * w
 
 
@@ -45,11 +48,11 @@ def best_response(others, others_planters):
 
 def choose(kind, rng, others, planters):
     return {
-        "one": lambda: 1,
-        "small": lambda: 5,
-        "big": lambda: 30,
+        "one": lambda: 1 * SCALE,
+        "small": lambda: 5 * SCALE,
+        "big": lambda: 30 * SCALE,
         "allin": lambda: min(CAP, 100),  # without a cap, "all in" = 100 seeds (1000 coins)
-        "random": lambda: rng.randint(1, 40) if rng.random() < 0.6 else 0,
+        "random": lambda: rng.randint(1, 40 * SCALE) if rng.random() < 0.6 else 0,
         "adaptive": lambda: best_response(others, planters),
     }[kind]()
 
@@ -65,9 +68,11 @@ def run(mix, seed):
             planters = sum(1 for j, v in last.items() if j != i and v)
             plants[i] = choose(kind, rng, others, planters)
         total = sum(plants.values())
-        planters = sum(1 for v in plants.values() if v >= 5)  # only staked planters deepen demand
+        planters = sum(1 for v in plants.values() if v)
         if total:
-            each = price(total, planters, weather(rng))
+            # every planter adds demand in proportion to own seeds, full at MIN_STAKE seeds
+            depth = sum(min(DEPTH, DEPTH / MIN_STAKE * v) for v in plants.values())
+            each = price(total, planters, weather(rng), depth)
             for i, n in plants.items():
                 gain = n * (each - COST)
                 profit[i] += gain

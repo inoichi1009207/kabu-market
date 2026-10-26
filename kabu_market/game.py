@@ -34,14 +34,18 @@ SEED_KEY = "kabu_seed_v2"
 TURNIP_SHELF_DAYS = 14
 STREAK_BONUS = (7, 30)  # every 7th consecutive check-in day adds 30 coins
 # Potatoes are a sealed planting pool, not a market good. Harvest every 3 days at 20:00;
-# price per potato = SEED_COST * HARVEST_K * D / (D + total planted) * weather, with
-# D = HARVEST_DEPTH per planter who staked at least HARVEST_MIN_STAKE seeds (so alt
-# accounts must risk real coins to deepen demand). Fewer than 2 planters: full refund.
+# price per potato = SEED_COST * HARVEST_K * D / (D + total planted) * weather, where
+# every planter adds demand in proportion to what they planted, up to HARVEST_DEPTH at
+# HARVEST_FULL_STAKE seeds: a one-seed tester still counts, and an alt account buys
+# only as much demand as it pays for. Fewer than 2 planters: full refund.
 # Calibrated by a multi-player simulation: no fixed amount is always best, random
-# planting loses, and nobody can see this period's total before the harvest.
-SEED_COST, PLANT_CAP = 10, 25  # PLANT_CAP: seeds per person per period in one group
-PLANT_CLOSE_WINDOW = 12 * 3600  # planting stops at a random moment this long before harvest
-HARVEST_DAYS, HARVEST_K, HARVEST_DEPTH, HARVEST_MIN_STAKE = 3, 1.8, 30, 5
+# planting roughly breaks even, and nobody can see this period's total before harvest.
+# Scaled x4 from the simulated 10-coin / 25-seed / depth-30 / stake-5 design (the game
+# only depends on total / depth, so it is the same game with finer steps; the seed is
+# rounded down to 2 coins). PLANT_CAP is per person per period in one group.
+SEED_COST, PLANT_CAP = 2, 100
+PLANT_CLOSE_WINDOW = 2 * 3600  # planting stops at a random moment this long before harvest
+HARVEST_DAYS, HARVEST_K, HARVEST_DEPTH, HARVEST_FULL_STAKE = 3, 1.8, 120, 20
 HARVEST_EPOCH = datetime(2026, 1, 1, 20, 0, tzinfo=TZ).timestamp()
 POTATO = "马铃薯"
 BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
@@ -530,11 +534,17 @@ class KabuMarket:
         ).fetchone()
         return row[0]
 
-    def harvest_price(self, scope_key, period, total, staked):
+    @staticmethod
+    def harvest_demand(seeds_by_planter):
+        return sum(
+            min(HARVEST_DEPTH, HARVEST_DEPTH * seeds / HARVEST_FULL_STAKE)
+            for seeds in seeds_by_planter
+        )
+
+    def harvest_price(self, scope_key, period, total, depth):
         """Price per potato and the weather factor (drawn only at harvest)."""
         weather = self.engine.rng("weather", scope_key, period).gauss(-0.03, 0.25)
         weather = max(0.5, min(1.8, math.exp(weather)))
-        depth = HARVEST_DEPTH * max(1, staked)
         return SEED_COST * HARVEST_K * depth / (depth + total) * weather, weather
 
     def _harvest(self, bot, now):
@@ -551,12 +561,12 @@ class KabuMarket:
                 (key, period),
             ).fetchall()
             total = sum(r["seeds"] for r in plants)
-            staked = sum(1 for r in plants if r["seeds"] >= HARVEST_MIN_STAKE)
+            depth = self.harvest_demand(r["seeds"] for r in plants)
             refund = len(plants) < 2
             if refund:
                 price, weather = float(SEED_COST), 1.0
             else:
-                price, weather = self.harvest_price(key, period, total, staked)
+                price, weather = self.harvest_price(key, period, total, depth)
             for plant in plants:
                 acct = self.account(bot, plant["user_id"], now)
                 cost = plant["seeds"] * SEED_COST
@@ -611,7 +621,7 @@ class KabuMarket:
         period = self.period(now)
         if now >= self.planting_closes_at(key, period):
             return (
-                f"这期已经停止播种了（停止时间每期随机，在收获前 12 小时内）。"
+                f"这期已经停止播种了（停止时间每期随机，在收获前 2 小时内）。"
                 f"{self.harvest_label(period)}收获后，下期再种。"
             )
         with self.store.transaction():
@@ -641,7 +651,7 @@ class KabuMarket:
         # and the player decides whether to recall it.
         return (
             "种好了。想让别人不知道你种了多少，可以撤回刚才那条消息。"
-            f"{self.harvest_label(period)}收获；停止播种的时间每期随机，在收获前 12 小时内。"
+            f"{self.harvest_label(period)}收获；停止播种的时间每期随机，在收获前 2 小时内。"
         )
 
     # -- commands -----------------------------------------------------------------
