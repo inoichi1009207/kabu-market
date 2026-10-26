@@ -11,8 +11,9 @@ import random
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
 
-from .prices import PriceEngine, slot_of, week_start
+from .prices import TZ, PriceEngine, slot_of, week_start
 
 COMMAND = re.compile(r"/kabu(?:\s+(.*))?", re.S)
 DAY = 86400
@@ -32,6 +33,17 @@ STARTER_COINS = 100  # once per person (all groups), on the first /kabu
 SEED_KEY = "kabu_seed_v2"
 TURNIP_SHELF_DAYS = 14
 STREAK_BONUS = (7, 30)  # every 7th consecutive check-in day adds 30 coins
+# Potatoes are a sealed planting pool, not a market good. Harvest every 3 days at 20:00;
+# price per potato = SEED_COST * HARVEST_K * D / (D + total planted) * weather, with
+# D = HARVEST_DEPTH per planter who staked at least HARVEST_MIN_STAKE seeds (so alt
+# accounts must risk real coins to deepen demand). Fewer than 2 planters: full refund.
+# Calibrated by a multi-player simulation: no fixed amount is always best, random
+# planting loses, and nobody can see this period's total before the harvest.
+SEED_COST, PLANT_CAP = 10, 25  # PLANT_CAP: seeds per person per period in one group
+PLANT_CLOSE_WINDOW = 12 * 3600  # planting stops at a random moment this long before harvest
+HARVEST_DAYS, HARVEST_K, HARVEST_DEPTH, HARVEST_MIN_STAKE = 3, 1.8, 30, 5
+HARVEST_EPOCH = datetime(2026, 1, 1, 20, 0, tzinfo=TZ).timestamp()
+POTATO = "马铃薯"
 BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
 ALL_WORDS = {"all", "全部"}
 # one-letter codes so players never switch input methods
@@ -48,7 +60,7 @@ TURNIP_TIPS = (
 class Product:
     name: str
     base: float
-    kind: str  # turnip | tomato | potato (price shapes in prices.py)
+    kind: str  # turnip | tomato (price shapes in prices.py)
     trait: str
 
 
@@ -65,7 +77,10 @@ PRODUCTS = (
         "tomato",
         "跟着新闻走：新闻公开，但涨跌多少、哪天反映、会不会反着走都说不准；不会坏",
     ),
-    Product("马铃薯", 12.0, "potato", "耐放不坏，价格大起大落，跌多了有回来的倾向"),
+)
+POTATO_TRAIT = (
+    "不在市场买卖，用 /kabu plant 种。每 3 天晚上 8 点收获，本群这期一共种得越多，"
+    "每个卖得越便宜；别人种了多少，收获时才揭晓"
 )
 
 SCHEMA = """
@@ -88,6 +103,23 @@ CREATE TABLE IF NOT EXISTS kabu_players (
     name TEXT NOT NULL,
     seen_at REAL NOT NULL,
     PRIMARY KEY (scope_key, user_id)
+);
+CREATE TABLE IF NOT EXISTS kabu_plants (
+    scope_key TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    period INTEGER NOT NULL,
+    seeds INTEGER NOT NULL CHECK (seeds > 0),
+    PRIMARY KEY (scope_key, user_id, period)
+);
+CREATE TABLE IF NOT EXISTS kabu_harvests (
+    scope_key TEXT NOT NULL,
+    period INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    planters INTEGER NOT NULL,
+    price REAL NOT NULL,
+    weather REAL NOT NULL,
+    PRIMARY KEY (scope_key, period)
 );
 CREATE TABLE IF NOT EXISTS kabu_stock (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,12 +172,14 @@ def code_of(name):
 
 def help_text():
     goods = "\n".join(f"· {p.name}（{code_of(p.name)}）：{p.trait}" for p in PRODUCTS)
+    goods += f"\n· {POTATO}（m）：{POTATO_TRAIT}"
     return (
         "大头菜市场（虚拟金币，所有群通用一个钱包）\n"
         f"第一次玩送 {STARTER_COINS} 金币。商品代号：大头菜 d、西红柿 x、马铃薯 m\n"
         f"/kabu sign：签到，每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
         "/kabu market 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
         "/kabu buy d 5　/kabu sell d 5（数量可写 all）　/kabu dump 清仓\n"
+        f"/kabu plant 10：种土豆，种薯 {SEED_COST} 金币一个，每人每期最多 {PLANT_CAP} 个，只能在群里种；种得越多，你自己的收获价也越低\n"
         "/kabu loan 500　/kabu repay 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
         "/kabu offer @群友 d 5 25：向群友报价（单价 25），对方 /kabu ok 编号 成交，/kabu cancel 编号 撤回；卖方付 5% 手续费\n"
         "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。货物跟着你走，在哪个群都能卖。\n"
@@ -280,11 +314,14 @@ class KabuMarket:
                 "sold, lent or checked in for anyone. 小道消息 rumours are unverified: never tell "
                 "players how often they are true, and do not confirm or deny one. A stated "
                 "investing preference may be remembered under the usual memory rules; these "
-                "numbers change every half day, so do not store them as memories."
+                "numbers change every half day, so do not store them as memories. "
+                "Nobody, including you, knows how many potatoes this chat planted this period "
+                "until the harvest: never guess or hint at it."
             ),
             "rules": help_text(),
             "prices_now_in_this_chat": prices,
             "tomato_news": news,
+            "potato": self.potato_public(key, now),
         }
         row = self.store.db.execute(
             "SELECT * FROM kabu_accounts WHERE bot_id=? AND user_id=?",
@@ -300,6 +337,7 @@ class KabuMarket:
                 "debt": acct["debt"],
                 "net_assets": math.floor(self.net_worth(acct, now)),
                 "goods": here,
+                "potatoes_planted_unharvested": self._planted(event.scope.bot_id, event.sender),
                 "checkin_streak": acct["streak"],
             }
         return facts
@@ -349,7 +387,7 @@ class KabuMarket:
             if product is None or (lot["expires_at"] is not None and lot["expires_at"] <= now):
                 continue
             value += self.price(product, now) * lot["quantity"]
-        return value
+        return value + SEED_COST * self._planted(acct["bot_id"], acct["user_id"])
 
     def _take(self, bot, user, scope_key, item, units, now):
         """Inside a transaction: remove ``units`` oldest-first; return the taken lots."""
@@ -425,6 +463,7 @@ class KabuMarket:
                 lots = json.loads(offer["lots"])
                 self._put(bot, offer["seller"], offer["scope_key"], offer["item"], lots)
                 self.store.db.execute("DELETE FROM kabu_offers WHERE id=?", (offer["id"],))
+            self._harvest(bot, now)
             debtors = self.store.db.execute(
                 "SELECT user_id FROM kabu_accounts WHERE bot_id=? AND debt>0", (bot,)
             ).fetchall()
@@ -454,7 +493,156 @@ class KabuMarket:
             if acct["debt"]
             else "债务已还清。"
         )
-        acct["notice"] = f"你资不抵债，被强制平仓：存货卖得 {income} 金币，还债 {paid}，{rest}"
+        self._notify(acct, f"你资不抵债，被强制平仓：存货卖得 {income} 金币，还债 {paid}，{rest}")
+
+    @staticmethod
+    def _notify(acct, text):
+        acct["notice"] = (acct["notice"] + "\n" if acct["notice"] else "") + text
+
+    # -- potatoes ---------------------------------------------------------------------
+
+    @staticmethod
+    def period(now):
+        return int((now - HARVEST_EPOCH) // (HARVEST_DAYS * DAY))
+
+    @staticmethod
+    def harvest_at(period):
+        return HARVEST_EPOCH + (period + 1) * HARVEST_DAYS * DAY
+
+    @staticmethod
+    def harvest_label(period):
+        moment = datetime.fromtimestamp(KabuMarket.harvest_at(period), TZ)
+        return f"{moment.month}月{moment.day}日晚上 8 点"
+
+    def planting_closes_at(self, scope_key, period):
+        """Candle-auction close: a secret random moment in the last PLANT_CLOSE_WINDOW.
+
+        Plant commands are public in a group, so a fixed deadline would reward whoever
+        waits to see everyone else's numbers. A random, unannounced close removes that.
+        """
+        offset = self.engine.rng("close", scope_key, period).uniform(0, PLANT_CLOSE_WINDOW)
+        return self.harvest_at(period) - offset
+
+    def _planted(self, bot, user):
+        row = self.store.db.execute(
+            "SELECT coalesce(sum(seeds),0) FROM kabu_plants WHERE bot_id=? AND user_id=?",
+            (bot, user),
+        ).fetchone()
+        return row[0]
+
+    def harvest_price(self, scope_key, period, total, staked):
+        """Price per potato and the weather factor (drawn only at harvest)."""
+        weather = self.engine.rng("weather", scope_key, period).gauss(-0.03, 0.25)
+        weather = max(0.5, min(1.8, math.exp(weather)))
+        depth = HARVEST_DEPTH * max(1, staked)
+        return SEED_COST * HARVEST_K * depth / (depth + total) * weather, weather
+
+    def _harvest(self, bot, now):
+        """Inside a transaction: settle every finished period of this Bot's groups."""
+        current = self.period(now)
+        due = self.store.db.execute(
+            "SELECT DISTINCT scope_key, period FROM kabu_plants WHERE bot_id=? AND period<?",
+            (bot, current),
+        ).fetchall()
+        for row in due:
+            key, period = row["scope_key"], row["period"]
+            plants = self.store.db.execute(
+                "SELECT user_id, seeds FROM kabu_plants WHERE scope_key=? AND period=?",
+                (key, period),
+            ).fetchall()
+            total = sum(r["seeds"] for r in plants)
+            staked = sum(1 for r in plants if r["seeds"] >= HARVEST_MIN_STAKE)
+            refund = len(plants) < 2
+            if refund:
+                price, weather = float(SEED_COST), 1.0
+            else:
+                price, weather = self.harvest_price(key, period, total, staked)
+            for plant in plants:
+                acct = self.account(bot, plant["user_id"], now)
+                cost = plant["seeds"] * SEED_COST
+                income = math.floor(plant["seeds"] * price)
+                acct["coins"] += income
+                if refund:
+                    self._notify(
+                        acct,
+                        f"这期土豆没开张：本群只有你一个人种，{plant['seeds']} 个种薯的 {cost} 金币已退回。",
+                    )
+                else:
+                    gain = income - cost
+                    verdict = f"赚了 {gain}" if gain >= 0 else f"亏了 {-gain}"
+                    self._notify(
+                        acct,
+                        f"土豆收获了：本群这期一共种了 {total} 个（{len(plants)} 人），"
+                        f"天气系数 {weather:.2f}，每个卖 {fmt(price)}；"
+                        f"你种了 {plant['seeds']} 个，收入 {income} 金币，{verdict}。",
+                    )
+                self.save(acct)
+            self.store.db.execute(
+                "INSERT OR REPLACE INTO kabu_harvests VALUES(?,?,?,?,?,?)",
+                (key, period, total, len(plants), price, weather),
+            )
+            self.store.db.execute(
+                "DELETE FROM kabu_plants WHERE scope_key=? AND period=?", (key, period)
+            )
+
+    def potato_public(self, scope_key, now):
+        """What anyone may know: the next harvest time and the last harvest here."""
+        period = self.period(now)
+        last = self.store.db.execute(
+            "SELECT * FROM kabu_harvests WHERE scope_key=? ORDER BY period DESC LIMIT 1",
+            (scope_key,),
+        ).fetchone()
+        facts = {"seed_cost": SEED_COST, "next_harvest": self.harvest_label(period)}
+        if last is not None:
+            facts["last_harvest"] = {
+                "total_planted": last["total"],
+                "planters": last["planters"],
+                "price_each": round(last["price"], 2),
+            }
+        return facts
+
+    def plant(self, event, args, now):
+        if event.scope.kind != "group":
+            return "土豆只能在群里种：收获价看全群一共种了多少，得和群友一起玩。"
+        amount = self._amount(args)
+        if isinstance(amount, str):
+            return f"用法：/kabu plant 10（种薯 {SEED_COST} 金币一个，每期最多 {PLANT_CAP} 个）"
+        bot, user, key = event.scope.bot_id, event.sender, event.scope.key
+        period = self.period(now)
+        if now >= self.planting_closes_at(key, period):
+            return (
+                f"这期已经停止播种了（停止时间每期随机，在收获前 12 小时内）。"
+                f"{self.harvest_label(period)}收获后，下期再种。"
+            )
+        with self.store.transaction():
+            acct = self.account(bot, user, now)
+            row = self.store.db.execute(
+                "SELECT seeds FROM kabu_plants WHERE scope_key=? AND user_id=? AND period=?",
+                (key, user, period),
+            ).fetchone()
+            have = row["seeds"] if row else 0
+            # The cap stops one rich player from flooding the whole group's harvest.
+            room = PLANT_CAP - have
+            if room <= 0:
+                return f"这期你在本群已经种满 {PLANT_CAP} 个了，等收获吧。"
+            seeds = min(room, acct["coins"] // SEED_COST) if amount is None else amount
+            if amount is not None and amount > room:
+                return f"这期你在本群最多还能种 {room} 个。"
+            cost = seeds * SEED_COST
+            if seeds <= 0 or cost > acct["coins"]:
+                return f"金币不够：种 {max(seeds, 1)} 个要 {max(cost, SEED_COST)} 金币，你有 {acct['coins']}。"
+            acct["coins"] -= cost
+            self.save(acct)
+            self.store.db.execute(
+                "INSERT INTO kabu_plants VALUES(?,?,?,?,?) ON CONFLICT(scope_key,user_id,period) DO UPDATE SET seeds=seeds+excluded.seeds",
+                (key, bot, user, period, seeds),
+            )
+        # The reply never repeats the amount: the plant command itself is the only leak,
+        # and the player decides whether to recall it.
+        return (
+            "种好了。想让别人不知道你种了多少，可以撤回刚才那条消息。"
+            f"{self.harvest_label(period)}收获；停止播种的时间每期随机，在收获前 12 小时内。"
+        )
 
     # -- commands -----------------------------------------------------------------
 
@@ -475,6 +663,10 @@ class KabuMarket:
             "repay": self.repay,
             "offer": self.offer,
             "dump": self.clear_out,
+            "plant": self.plant,
+            "p": self.plant,
+            "种": self.plant,
+            "种土豆": self.plant,
             "ok": self.accept,
             "accept": self.accept,
             "cancel": self.withdraw,
@@ -532,6 +724,8 @@ class KabuMarket:
         match = re.fullmatch(r"(\S+?)\s*(?:[*×]\s*|\s+)(\d+|全部|all)", joined, re.I)
         word, amount = (match.group(1), match.group(2)) if match else (joined, "1")
         item = self.item_name(word)
+        if ITEM_CODES.get(word.lower(), word) == POTATO:
+            return f"马铃薯不在市场买卖，改成种了：/kabu plant 10（种薯 {SEED_COST} 金币一个）"
         if item is None:
             names = "、".join(f"{name} {code}" for code, name in ITEM_CODES.items())
             return f"没有这种商品。可以买卖：{names}。" if word else "用法：/kabu buy d 5"
@@ -553,8 +747,10 @@ class KabuMarket:
     def tip(self, now):
         """A rumour about any good; true or false with equal odds."""
         day, half = slot_of(now)
-        product = self.random.choice(PRODUCTS)
+        product = self.random.choice(PRODUCTS + (None,))
         truthful = self.random.random() < TIP_TRUTH
+        if product is None:  # potatoes: is this period busier than the last one?
+            return self._potato_tip(now, truthful)
         if product.kind == "turnip":
             truth = self.engine.pattern(week_start(day))
             others = [p for p in range(len(TURNIP_TIPS)) if p != truth]
@@ -567,6 +763,21 @@ class KabuMarket:
             rising = not rising
         word = "要涨" if rising else "要跌"
         return f"{product.name}过两天{word}"
+
+    def _potato_tip(self, now, truthful):
+        """Is this period, so far, busier than the last harvest (all groups together)?"""
+        period = self.period(now)
+        current = self.store.db.execute(
+            "SELECT coalesce(sum(seeds),0) FROM kabu_plants WHERE period=?", (period,)
+        ).fetchone()[0]
+        last = self.store.db.execute(
+            "SELECT coalesce(sum(total),0) FROM kabu_harvests WHERE period=?",
+            (period - 1,),
+        ).fetchone()[0]
+        busy = current > last
+        if not truthful:
+            busy = not busy
+        return "这期大家都在抢着种土豆" if busy else "这期没什么人种土豆"
 
     def checkin(self, event, _args, now):
         bot, user = event.scope.bot_id, event.sender
@@ -620,9 +831,10 @@ class KabuMarket:
             + fmt(self.price(p, now) * self.impact(event.scope.key, p.name, now))
             for p in PRODUCTS
         )
+        prices += f"　{POTATO}(m) 种薯 {SEED_COST}"
         return (
             f"你有 {coins} 金币｜{prices}\n"
-            "常用：/kabu sign 签到 · buy d 5 · sell d 5 · bag 仓库 · market 行情\n"
+            "常用：/kabu sign 签到 · buy d 5 · sell d 5 · plant 5 种土豆 · market 行情\n"
             "发 /kabu help 看全部玩法"
         )
 
@@ -633,6 +845,12 @@ class KabuMarket:
             impact = self.impact(event.scope.key, product.name, now)
             quote = self.price(product, now) * impact
             lines.append(f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个")
+        public = self.potato_public(event.scope.key, now)
+        potato = f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获"
+        last = public.get("last_harvest")
+        if last:
+            potato += f"；上期本群共种 {last['total_planted']} 个，每个卖 {fmt(last['price_each'])}"
+        lines.append(potato)
         day = self.day(now)
         for when_day, label in ((day, "今天"), (day - 1, "昨天")):
             headline = self.engine.headline(when_day)
@@ -666,6 +884,12 @@ class KabuMarket:
                 text += line
         else:
             text += "\n没有存货。"
+        planted = self.store.db.execute(
+            "SELECT period, sum(seeds) AS n FROM kabu_plants WHERE bot_id=? AND user_id=? GROUP BY period",
+            (bot, user),
+        ).fetchall()
+        for row in planted:
+            text += f"\n地里有 {row['n']} 个土豆，{self.harvest_label(row['period'])}收获。"
         if rotten:
             gone = "、".join(f"{n} 个{i}" for i, n in rotten.items())
             text += f"\n刚刚烂掉：{gone}。"

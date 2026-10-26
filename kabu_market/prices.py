@@ -1,14 +1,13 @@
 """Deterministic /kabu price engine: one global base path per item, two prices a day.
 
 Everything derives from a server-local salt, so prices survive restarts and players
-cannot compute them. Three shapes (independently written; ideas only, no code copied):
+cannot compute them. Two shapes (independently written; ideas only, no code copied):
 
 - turnip: a hidden weekly pattern chosen by a Markov chain on last week's pattern
   (fluctuating / large spike / decreasing / small spike);
 - tomato: driven by public news whose size, timing and even direction are uncertain;
-- potato: a mean-reverting log walk with the fattest tails.
 
-All three carry multiplicative GARCH(1,1)-t noise. alpha/beta/nu are the median fit to
+Both carry multiplicative GARCH(1,1)-t noise. alpha/beta/nu are the median fit to
 10 A-share stocks (2024-03 to 2026-10 daily closes, see tools/fit_kline.py); only the scale
 differs per item.
 """
@@ -90,7 +89,6 @@ class PriceEngine:
         self._patterns = []
         self._tomato = []  # tomato log level per slot
         self._news = {}
-        self._potato = []  # potato log level per slot
         self._weeks = {}
         self._noise = {}
 
@@ -248,14 +246,3 @@ class PriceEngine:
                 step += self._news_jump(slot_day)
             self._tomato.append(max(-1.4, min(1.4, (1 - kappa) * previous + step)))
         return base * math.exp(self._tomato[index])
-
-    # -- potato ----------------------------------------------------------------------
-
-    def potato(self, base, day, half, *, kappa=0.12, scale=0.12):
-        index = self._slot_index(day, half)
-        while len(self._potato) <= index:
-            k = len(self._potato)
-            previous = self._potato[-1] if self._potato else 0.0
-            step = self.noise_at("potato", scale, k, nu=3.0)
-            self._potato.append(max(-1.6, min(1.6, (1 - kappa) * previous + step)))
-        return base * math.exp(self._potato[index])

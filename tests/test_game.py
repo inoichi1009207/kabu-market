@@ -84,14 +84,17 @@ def test_buy_in_one_group_sell_in_another_at_that_groups_price(market, clock):
     go(clock, 1)
     give(market, 100_000)
     give(market, 100_000, "whale")
-    key, other = Scope("bot", "group", GROUP).key, Scope("bot", "group", OTHER).key
-    market.respond(ev(clock, "/kabu buy m 200", sender="whale", peer=OTHER))  # pumps OTHER
-    assert market.impact(other, "马铃薯", clock.now()) > market.impact(key, "马铃薯", clock.now())
-    market.respond(ev(clock, "/kabu buy m 10"))  # cheap here
-    pumped = market.impact(other, "马铃薯", clock.now())
-    text = market.respond(ev(clock, "/kabu sell m 10", peer=OTHER))  # sell into the pumped group
-    assert "卖出 10 个马铃薯" in text and held(market, "马铃薯") == 0
-    assert market.impact(other, "马铃薯", clock.now()) < pumped  # the arbitrage closes the gap
+    key, other = (
+        Scope("bot", "group", GROUP).key,
+        Scope("bot", "group", OTHER).key,
+    )
+    market.respond(ev(clock, "/kabu buy x 200", sender="whale", peer=OTHER))  # pumps OTHER
+    assert market.impact(other, "西红柿", clock.now()) > market.impact(key, "西红柿", clock.now())
+    market.respond(ev(clock, "/kabu buy x 10"))  # cheap here
+    pumped = market.impact(other, "西红柿", clock.now())
+    text = market.respond(ev(clock, "/kabu sell x 10", peer=OTHER))  # sell into the pumped group
+    assert "卖出 10 个西红柿" in text and held(market, "西红柿") == 0
+    assert market.impact(other, "西红柿", clock.now()) < pumped  # the arbitrage closes the gap
 
 
 # -- turnip rhythm and rot ----------------------------------------------------------
@@ -121,22 +124,12 @@ def test_first_kabu_ever_grants_starter_coins_once(market, clock):
 def test_clear_out_sells_everything_here(market, clock):
     go(clock, 6)
     give(market, 10_000)
-    for item in ("大头菜", "西红柿", "马铃薯"):
+    for item in ("大头菜", "西红柿"):
         market.respond(ev(clock, f"/kabu 买 {item} 3"))
     text = market.respond(ev(clock, "/kabu 清仓"))
-    for item in ("大头菜", "西红柿", "马铃薯"):
+    for item in ("大头菜", "西红柿"):
         assert f"卖出 3 个{item}" in text and held(market, item) == 0
     assert "没有存货" in market.respond(ev(clock, "/kabu 清仓", peer=OTHER))
-
-
-def test_tomatoes_and_potatoes_never_rot(market, clock):
-    go(clock, 0)
-    give(market, 10_000)
-    market.respond(ev(clock, "/kabu 买 西红柿 2"))
-    market.respond(ev(clock, "/kabu 买 马铃薯 2"))
-    clock.advance(60 * K.DAY)
-    text = market.respond(ev(clock, "/kabu 仓库"))
-    assert "2 个西红柿" in text and "2 个马铃薯" in text and "烂" not in text
 
 
 def test_tomato_news_is_public_moves_price_but_not_always_as_headlined():
@@ -175,9 +168,9 @@ def test_buys_push_price_up_sells_push_down_and_round_trip_loses(market, clock):
     go(clock, 0)
     give(market, 100_000)
     key = Scope("bot", "group", GROUP).key
-    market.respond(ev(clock, "/kabu 买 马铃薯 50"))
-    assert market.impact(key, "马铃薯", clock.now()) == pytest.approx(K.BUY_STEP**50)
-    market.respond(ev(clock, "/kabu 卖 马铃薯 50"))
+    market.respond(ev(clock, "/kabu 买 西红柿 50"))
+    assert market.impact(key, "西红柿", clock.now()) == pytest.approx(K.BUY_STEP**50)
+    market.respond(ev(clock, "/kabu 卖 西红柿 50"))
     assert acct(market)["coins"] < 100_000
     for units in (1, 10, 500):
         cost, after = KabuMarket.buy_cost(10.0, 1.0, units)
@@ -189,11 +182,11 @@ def test_impact_fades_and_is_per_group(market, clock):
     give(market, 100_000)
     key = Scope("bot", "group", GROUP).key
     other = Scope("bot", "group", OTHER).key
-    market.respond(ev(clock, "/kabu 买 马铃薯 100"))
-    start = market.impact(key, "马铃薯", clock.now())
-    assert market.impact(other, "马铃薯", clock.now()) == 1.0
+    market.respond(ev(clock, "/kabu 买 西红柿 100"))
+    start = market.impact(key, "西红柿", clock.now())
+    assert market.impact(other, "西红柿", clock.now()) == 1.0
     clock.advance(K.IMPACT_HALF_LIFE)
-    assert market.impact(key, "马铃薯", clock.now()) - 1 == pytest.approx((start - 1) / 2)
+    assert market.impact(key, "西红柿", clock.now()) - 1 == pytest.approx((start - 1) / 2)
 
 
 # -- prices -------------------------------------------------------------------------
@@ -201,12 +194,12 @@ def test_impact_fades_and_is_per_group(market, clock):
 
 def test_prices_are_two_a_day_deterministic_and_survive_restart(market, store, clock):
     go(clock, 1, hour=9)
-    potato = market.products["马铃薯"]
-    morning = market.price(potato, clock.now())
-    assert market.price(potato, clock.now() + 3600) == morning
-    assert KabuMarket(store, clock).price(potato, clock.now()) == morning
+    tomato = market.products["西红柿"]
+    morning = market.price(tomato, clock.now())
+    assert market.price(tomato, clock.now() + 3600) == morning
+    assert KabuMarket(store, clock).price(tomato, clock.now()) == morning
     clock.advance(6 * 3600)
-    assert market.price(potato, clock.now()) != morning
+    assert market.price(tomato, clock.now()) != morning
 
 
 def test_turnip_week_shapes_and_markov_patterns():
@@ -226,18 +219,6 @@ def test_turnip_week_shapes_and_markov_patterns():
     patterns = [engine.pattern(week_start(740000) + 7 * w) for w in range(200)]
     repeats = sum(a == b == 1 for a, b in zip(patterns, patterns[1:]))
     assert repeats < 10  # a large spike rarely follows a large spike
-
-
-def test_tomato_and_potato_stay_in_bounds_and_move():
-    engine = PriceEngine("t", 740000)
-    tomatoes = [engine.tomato(30, 740000 + d, h) for d in range(400) for h in (0, 1)]
-    potatoes = [engine.potato(12, 740000 + d, h) for d in range(400) for h in (0, 1)]
-    assert 30 * math.exp(-1.5) < min(tomatoes) and max(tomatoes) < 30 * math.exp(1.5)
-    assert 12 * math.exp(-1.7) < min(potatoes) and max(potatoes) < 12 * math.exp(1.7)
-    assert max(tomatoes) / min(tomatoes) > 1.5  # news moves it, not a flat line
-
-
-# -- loans --------------------------------------------------------------------------
 
 
 def test_borrow_limit_interest_and_repay(market, clock):
@@ -266,7 +247,7 @@ def test_margin_call_liquidates_and_checkin_repays_half(market, clock):
     go(clock, 0)
     give(market, 100)
     market.respond(ev(clock, "/kabu 借 100"))
-    market.respond(ev(clock, "/kabu 买 马铃薯 全部"))
+    market.respond(ev(clock, "/kabu 买 西红柿 全部"))
     with market.store.transaction():  # the potato price collapses
         a = market.account("bot", "u1", clock.now())
         a["debt"] = 5000
@@ -275,7 +256,7 @@ def test_margin_call_liquidates_and_checkin_repays_half(market, clock):
         ev(clock, "/kabu 仓库", sender="u2")
     )  # anyone's command runs margin calls
     assert "强制平仓" not in text
-    assert held(market, "马铃薯") == 0
+    assert held(market, "西红柿") == 0
     assert "强制平仓" in market.respond(ev(clock, "/kabu 仓库"))
     debt = acct(market)["debt"]
     clock.advance(K.DAY)
@@ -292,19 +273,19 @@ def test_offer_escrows_goods_and_accept_moves_coins_with_fee(market, clock):
     go(clock, 0)
     give(market, 10_000, "u1")
     give(market, 10_000, "u2")
-    market.respond(ev(clock, "/kabu 买 马铃薯 10", sender="u1"))
+    market.respond(ev(clock, "/kabu 买 西红柿 10", sender="u1"))
     market.respond(ev(clock, "/kabu", sender="u2", name="阿二"))
-    price = market.price(market.products["马铃薯"], clock.now())
+    price = market.price(market.products["西红柿"], clock.now())
     unit = max(1, math.ceil(price * 0.9))
     text = market.respond(
-        ev(clock, f"/kabu 卖给 马铃薯 4 单价 {unit}", sender="u1", mentions=["u2"])
+        ev(clock, f"/kabu 卖给 西红柿 4 单价 {unit}", sender="u1", mentions=["u2"])
     )
     assert "报价 #1" in text and "@阿二" in text
-    assert held(market, "马铃薯", "u1") == 6
+    assert held(market, "西红柿", "u1") == 6
     assert "不是给你的" in market.respond(ev(clock, "/kabu 接受 1", sender="u3"))
     seller_before = acct(market, "u1")["coins"]
     assert "成交" in market.respond(ev(clock, "/kabu 接受 1", sender="u2"))
-    assert held(market, "马铃薯", "u2") == 4
+    assert held(market, "西红柿", "u2") == 4
     assert acct(market, "u2")["coins"] == 10_000 - 4 * unit
     assert acct(market, "u1")["coins"] - seller_before == math.floor(4 * unit * 0.95)
 
@@ -312,24 +293,24 @@ def test_offer_escrows_goods_and_accept_moves_coins_with_fee(market, clock):
 def test_offer_band_self_trade_withdraw_and_expiry(market, clock):
     go(clock, 0)
     give(market, 10_000)
-    market.respond(ev(clock, "/kabu 买 马铃薯 10"))
-    price = market.price(market.products["马铃薯"], clock.now())
+    market.respond(ev(clock, "/kabu 买 西红柿 10"))
+    price = market.price(market.products["西红柿"], clock.now())
     assert "50%–200%" in market.respond(
-        ev(clock, "/kabu 卖给 马铃薯 1 单价 99999", mentions=["u2"])
+        ev(clock, "/kabu 卖给 西红柿 1 单价 99999", mentions=["u2"])
     )
-    assert "用法" in market.respond(ev(clock, "/kabu 卖给 马铃薯 1 单价 10", mentions=["u1"]))
-    assert "用法" in market.respond(ev(clock, "/kabu 卖给 马铃薯 1 单价 10", mentions=["bot"]))
+    assert "用法" in market.respond(ev(clock, "/kabu 卖给 西红柿 1 单价 10", mentions=["u1"]))
+    assert "用法" in market.respond(ev(clock, "/kabu 卖给 西红柿 1 单价 10", mentions=["bot"]))
     unit = math.ceil(price)
-    market.respond(ev(clock, f"/kabu 卖给 马铃薯 3 单价 {unit}", mentions=["u2"]))
+    market.respond(ev(clock, f"/kabu 卖给 西红柿 3 单价 {unit}", mentions=["u2"]))
     assert "已撤回" in market.respond(ev(clock, "/kabu 撤回 1"))
-    assert held(market, "马铃薯") == 10
-    market.respond(ev(clock, f"/kabu 卖给 马铃薯 3 单价 {unit}", mentions=["u2"]))
+    assert held(market, "西红柿") == 10
+    market.respond(ev(clock, f"/kabu 卖给 西红柿 3 单价 {unit}", mentions=["u2"]))
     clock.advance(K.OFFER_TTL + 1)
     market.respond(ev(clock, "/kabu 市场", sender="u9"))
-    assert held(market, "马铃薯") == 10
+    assert held(market, "西红柿") == 10
     assert "过期" in market.respond(ev(clock, "/kabu 接受 2", sender="u2"))
     assert "只能在群里" in market.respond(
-        ev(clock, "/kabu 卖给 马铃薯 1 单价 10", kind="private", peer="u1")
+        ev(clock, "/kabu 卖给 西红柿 1 单价 10", kind="private", peer="u1")
     )
 
 
@@ -345,28 +326,6 @@ def test_ranking_orders_group_players_by_net_worth(market, clock):
     market.respond(ev(clock, "/kabu", sender="u3", name="丙", peer=OTHER))
     text = market.respond(ev(clock, "/kabu 排行"))
     assert text.index("乙：900") < text.index("甲：500") and "丙" not in text
-
-
-def test_tips_cover_every_good_and_are_half_false(market, clock):
-    go(clock, 1)
-    seen, truths = set(), 0
-    rng = random.Random(3)
-    market.random = rng
-    for _ in range(400):
-        text = market.tip(clock.now())
-        seen.add(next(p.name for p in K.PRODUCTS if p.name in text))
-    assert seen == {p.name for p in K.PRODUCTS}
-    # potato/tomato rumours: about half say the opposite of what actually happens
-    potato = market.products["马铃薯"]
-    rising = market.price(potato, clock.now() + 2 * K.DAY) > market.price(potato, clock.now())
-    market.random = random.Random(11)
-    said = []
-    for _ in range(600):
-        text = market.tip(clock.now())
-        if "马铃薯" in text:
-            said.append(("要涨" in text) == rising)
-    truths = sum(said) / len(said)
-    assert 0.4 < truths < 0.6
 
 
 @pytest.mark.parametrize(
@@ -396,7 +355,7 @@ def test_bad_input_mention_prefix_and_matching(market, clock):
 def test_first_price_read_inside_a_transaction_creates_the_seed(store, clock):
     market = KabuMarket(store, clock)
     with store.transaction():
-        assert market.price(market.products["马铃薯"], clock.now()) > 0
+        assert market.price(market.products["西红柿"], clock.now()) > 0
     assert store.get(K.SEED_KEY)["salt"]
 
 
@@ -415,9 +374,9 @@ def test_knowledge_is_read_only_and_describes_this_chat(market, store, clock):
     }
     assert store.db.execute("SELECT count(*) FROM kabu_accounts").fetchone()[0] == 0
     give(market, 500)
-    market.respond(ev(clock, "/kabu 买 马铃薯 3"))
-    facts = market.knowledge(ev(clock, "我该不该卖马铃薯"))
-    assert facts["asker"]["goods"] == {"马铃薯": 3}
+    market.respond(ev(clock, "/kabu 买 西红柿 3"))
+    facts = market.knowledge(ev(clock, "我该不该卖西红柿"))
+    assert facts["asker"]["goods"] == {"西红柿": 3}
     assert "opinion" in facts["note"] and "/kabu" in facts["rules"]
 
 
@@ -436,14 +395,14 @@ def test_short_ascii_commands_and_item_codes(market, clock):
     give(market, 10_000)
     assert "买了 3 个大头菜" in market.respond(ev(clock, "/kabu buy d 3"))
     assert "买了 2 个西红柿" in market.respond(ev(clock, "/kabu B X*2"))
-    assert "买了 1 个马铃薯" in market.respond(ev(clock, "/kabu buy m"))
+    assert "改成种了" in market.respond(ev(clock, "/kabu buy m"))
     assert "卖出 1 个大头菜" in market.respond(ev(clock, "/kabu sell d 1"))
     assert "大头菜（d）" in market.respond(ev(clock, "/kabu mkt"))
     assert "2 个大头菜" in market.respond(ev(clock, "/kabu bag"))
     assert "借到 100" in market.respond(ev(clock, "/kabu loan 100"))
     assert "还款 100" in market.respond(ev(clock, "/kabu repay all"))
-    unit = math.ceil(market.price(market.products["马铃薯"], clock.now()))
-    text = market.respond(ev(clock, f"/kabu offer m 1 {unit}", mentions=["u2"]))
+    unit = math.ceil(market.price(market.products["西红柿"], clock.now()))
+    text = market.respond(ev(clock, f"/kabu offer x 1 {unit}", mentions=["u2"]))
     assert "/kabu ok 1" in text
     assert "成交" in market.respond(ev(clock, "/kabu ok 1", sender="u2"))
     market.respond(
@@ -468,3 +427,118 @@ def test_bare_kabu_is_a_short_card_not_the_full_rules(market, clock):
     assert len(text.splitlines()) <= 4  # welcome + three-line card
     assert "强制平仓" not in text  # the full rules live in /kabu help
     assert "没有这种商品" in market.respond(ev(clock, "/kabu buy q 1"))
+
+
+# -- potatoes: a sealed planting pool -------------------------------------------------
+
+
+def plant_time(market, clock):
+    """A moment safely before this period's random planting close."""
+    period = market.period(clock.now())
+    close = market.planting_closes_at(Scope("bot", "group", GROUP).key, period)
+    if clock.now() >= close:  # move into the next period's open window
+        clock.timestamp = market.harvest_at(period) + 60
+    return market.period(clock.now())
+
+
+def to_harvest(market, clock, period):
+    clock.timestamp = market.harvest_at(period) + 60
+
+
+def test_tomatoes_never_rot_and_potatoes_are_not_a_market_good(market, clock):
+    go(clock, 0)
+    give(market, 10_000)
+    market.respond(ev(clock, "/kabu buy x 2"))
+    clock.advance(60 * K.DAY)
+    assert "2 个西红柿" in market.respond(ev(clock, "/kabu bag"))
+    assert "改成种了" in market.respond(ev(clock, "/kabu buy m 3"))
+    assert "改成种了" in market.respond(ev(clock, "/kabu 买 马铃薯 3"))
+
+
+def test_plant_reply_hides_the_amount_and_respects_the_cap(market, clock):
+    plant_time(market, clock)
+    give(market, 1000)
+    text = market.respond(ev(clock, "/kabu plant 13"))
+    assert "种好了" in text and "撤回" in text and "13" not in text
+    assert acct(market)["coins"] == 1000 - 13 * K.SEED_COST
+    assert f"最多还能种 {K.PLANT_CAP - 13}" in market.respond(
+        ev(clock, f"/kabu plant {K.PLANT_CAP}")
+    )
+    market.respond(ev(clock, f"/kabu plant {K.PLANT_CAP - 13}"))
+    assert "种满" in market.respond(ev(clock, "/kabu plant 1"))
+    assert f"地里有 {K.PLANT_CAP} 个土豆" in market.respond(ev(clock, "/kabu bag"))
+    assert "只能在群里种" in market.respond(ev(clock, "/kabu plant 1", kind="private", peer="u1"))
+
+
+def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
+    period = plant_time(market, clock)
+    give(market, 1000, "u1")
+    give(market, 1000, "u2")
+    market.respond(ev(clock, "/kabu plant 10", sender="u1"))
+    market.respond(ev(clock, "/kabu plant 6", sender="u2"))
+    key = Scope("bot", "group", GROUP).key
+    # nobody can see this period's total before the harvest
+    assert "共种" not in market.respond(ev(clock, "/kabu market", sender="u3"))
+    potato = market.knowledge(ev(clock, "土豆种了多少", sender="u3"))["potato"]
+    assert set(potato) == {
+        "seed_cost",
+        "next_harvest",
+    }  # no running total, no last harvest yet
+    to_harvest(market, clock, period)
+    price, weather = market.harvest_price(key, period, 16, 2)
+    depth = K.HARVEST_DEPTH * 2  # both planters staked at least HARVEST_MIN_STAKE
+    expected = K.SEED_COST * K.HARVEST_K * depth / (depth + 16) * weather
+    assert price == pytest.approx(expected)
+    text = market.respond(ev(clock, "/kabu bag", sender="u1"))
+    assert "土豆收获了：本群这期一共种了 16 个（2 人）" in text
+    assert acct(market, "u1")["coins"] == 900 + math.floor(10 * price)
+    assert acct(market, "u2")["coins"] == 940 + math.floor(6 * price)
+    assert "上期本群共种 16 个" in market.respond(ev(clock, "/kabu market"))
+    assert "收获了" not in market.respond(ev(clock, "/kabu bag", sender="u1"))  # told once
+
+
+def test_lonely_planter_is_refunded(market, clock):
+    period = plant_time(market, clock)
+    give(market, 500)
+    market.respond(ev(clock, "/kabu plant 5"))
+    to_harvest(market, clock, period)
+    assert "已退回" in market.respond(ev(clock, "/kabu bag"))
+    assert acct(market)["coins"] == 500
+
+
+def test_planting_stops_at_a_secret_random_time_before_harvest(market, clock):
+    period = plant_time(market, clock)
+    key = Scope("bot", "group", GROUP).key
+    close = market.planting_closes_at(key, period)
+    assert market.harvest_at(period) - K.PLANT_CLOSE_WINDOW <= close <= market.harvest_at(period)
+    closes = {round(market.planting_closes_at(key, p)) % 86400 for p in range(period, period + 20)}
+    assert len(closes) > 10  # different every period
+    clock.timestamp = close + 1
+    give(market, 500)
+    assert "停止播种" in market.respond(ev(clock, "/kabu plant 3"))
+
+
+def test_planted_seeds_count_in_net_worth(market, clock):
+    plant_time(market, clock)
+    give(market, 300)
+    market.respond(ev(clock, "/kabu plant 10"))
+    assert "净资产 300" in market.respond(ev(clock, "/kabu bag"))
+
+
+def test_tips_cover_every_good_and_are_half_false(market, clock):
+    go(clock, 1)
+    market.random = random.Random(3)
+    said = set()
+    for _ in range(400):
+        text = market.tip(clock.now())
+        said.add("土豆" if "土豆" in text else next(p.name for p in K.PRODUCTS if p.name in text))
+    assert said == {"大头菜", "西红柿", "土豆"}
+    tomato = market.products["西红柿"]
+    rising = market.price(tomato, clock.now() + 2 * K.DAY) > market.price(tomato, clock.now())
+    market.random = random.Random(11)
+    hits = []
+    for _ in range(600):
+        text = market.tip(clock.now())
+        if "西红柿" in text:
+            hits.append(("要涨" in text) == rising)
+    assert 0.4 < sum(hits) / len(hits) < 0.6
