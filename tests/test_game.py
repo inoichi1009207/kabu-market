@@ -295,7 +295,9 @@ def test_margin_call_liquidates_and_checkin_repays_half(market, clock):
     assert acct(market)["coins"] == kept
 
 
-def test_goods_in_an_open_offer_still_count_and_are_sold_in_a_margin_call(market, clock):
+def test_goods_in_an_open_offer_still_count_and_are_sold_in_a_margin_call(
+    market, clock
+):
     go(clock, 0)
     give(market, 100)
     market.respond(ev(clock, "/kabu", sender="u2", name="阿二"))
@@ -542,20 +544,27 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
     assert set(potato) == {
         "seed_cost",
         "next_harvest",
+        "players_this_period",
+        "demand_per_player",
     }  # no running total, no last harvest yet
+    assert potato["players_this_period"] == 3  # u3 plays but does not plant
     to_harvest(market, clock, period)
-    depth = market.harvest_demand([40, 24])
-    assert depth == K.HARVEST_DEPTH * 2  # both planted at least HARVEST_FULL_STAKE
+    depth = market.harvest_demand(3)
+    assert depth == K.HARVEST_PER_PLAYER * 3
     price, weather = market.harvest_price(key, period, 64, depth)
-    expected = K.SEED_COST * K.HARVEST_K * depth / (depth + 64) * weather
-    assert price == pytest.approx(expected)
+    assert price == pytest.approx(K.SEED_COST * K.HARVEST_K * depth / (depth + 64))
+    mine = {u: market.plot_price(key, period, u, price, weather) for u in ("u1", "u2")}
+    for u in mine:
+        assert price * 0.5 <= mine[u] <= price * 1.8
+    assert mine["u1"] != mine["u2"]  # each plot grows differently
     text = market.respond(ev(clock, "/kabu bag", sender="u1"))
     assert "土豆收获了：本群这期一共种了 64 个（2 人）" in text
+    assert f"最高 {K.fmt(max(mine.values()))}、最低 {K.fmt(min(mine.values()))}" in text
     assert acct(market, "u1")["coins"] == 1000 - 40 * K.SEED_COST + math.floor(
-        40 * price
+        40 * mine["u1"] + 0.5
     )
     assert acct(market, "u2")["coins"] == 1000 - 24 * K.SEED_COST + math.floor(
-        24 * price
+        24 * mine["u2"] + 0.5
     )
     assert "上期本群共种 64 个" in market.respond(ev(clock, "/kabu market"))
     assert "收获了" not in market.respond(
@@ -623,12 +632,60 @@ def test_tips_cover_every_good_and_are_half_false(market, clock):
     assert 0.4 < sum(hits) / len(hits) < 0.6
 
 
-def test_every_planter_adds_demand_in_proportion_to_what_they_planted():
-    full = K.HARVEST_DEPTH
-    assert KabuMarket.harvest_demand([1]) == pytest.approx(full / K.HARVEST_FULL_STAKE)
-    assert KabuMarket.harvest_demand([K.HARVEST_FULL_STAKE]) == pytest.approx(full)
-    assert KabuMarket.harvest_demand([100]) == pytest.approx(full)  # capped per planter
-    # a one-seed tester counts, but an alt planting one seed buys only a sliver of demand
-    assert KabuMarket.harvest_demand([30, 1]) == pytest.approx(
-        full + full / K.HARVEST_FULL_STAKE
+def test_demand_counts_players_of_this_period_not_seeds_planted(market, clock):
+    period = plant_time(market, clock)
+    key = Scope("bot", "group", GROUP).key
+    for user in ("u1", "u2"):
+        give(market, 1000, user)
+    market.respond(ev(clock, "/kabu", sender="u3"))  # plays, plants nothing
+    market.respond(ev(clock, "/kabu", sender="u4", peer=OTHER))  # another group
+    assert market.active_players(key, period) == 1
+    for seeds, user in ((20, "u1"), (5, "u2")):
+        market.respond(ev(clock, f"/kabu plant {seeds}", sender=user))
+    assert market.active_players(key, period) == 3
+    assert f"需求 D 目前是 {K.HARVEST_PER_PLAYER * 3}" in market.respond(
+        ev(clock, "/kabu market", sender="u3")
     )
+    # splitting one stake over more planters adds no demand by itself
+    assert KabuMarket.harvest_demand(3) == 3 * K.HARVEST_PER_PLAYER
+    to_harvest(market, clock, period + 1)  # someone seen in a later period only
+    assert market.active_players(key, period + 1) <= 1
+
+
+def test_harvest_rounds_payouts_so_small_stakes_can_win(market, clock):
+    period = plant_time(market, clock)
+    give(market, 1000, "u1")
+    give(market, 1000, "u2")
+    market.respond(ev(clock, "/kabu plant 3", sender="u1"))
+    market.respond(ev(clock, "/kabu plant 3", sender="u2"))
+    key = Scope("bot", "group", GROUP).key
+    to_harvest(market, clock, period)
+    price, weather = market.harvest_price(key, period, 6, market.harvest_demand(2))
+    mine = market.plot_price(key, period, "u1", price, weather)
+    market.respond(ev(clock, "/kabu bag", sender="u1"))
+    assert acct(market, "u1")["coins"] == 1000 - 6 + math.floor(3 * mine + 0.5)
+
+
+def test_turnips_are_never_sold_below_this_weeks_sunday_price(market, clock):
+    turnip = market.products["大头菜"]
+    go(clock, 5, 9)  # a Saturday (Mon=0)
+    for _ in range(30):  # find a Saturday whose price sits below its Sunday price
+        sunday = market.engine.turnip(
+            turnip.base, week_start(market.day(clock.now())), 0
+        )
+        if market.price(turnip, clock.now()) < sunday * 0.95:
+            break
+        clock.advance(7 * K.DAY)
+    else:
+        pytest.fail("no cheap Saturday in 30 weeks")
+    assert market.ask(turnip, clock.now()) == pytest.approx(sunday)
+    give(market, 10_000)
+    market.respond(ev(clock, "/kabu buy d 1"))
+    assert acct(market)["coins"] == 10_000 - math.ceil(sunday - 1e-9)
+    assert "买入要" in market.respond(ev(clock, "/kabu market"))
+    assert "（买 " in market.respond(ev(clock, "/kabu"))
+    # tomatoes, and turnips at or above the Sunday price, cost the shown price
+    tomato = market.products["西红柿"]
+    assert market.ask(tomato, clock.now()) == market.price(tomato, clock.now())
+    go(clock, 6, 9)  # Sunday: the buy price is today's price
+    assert market.ask(turnip, clock.now()) == market.price(turnip, clock.now())

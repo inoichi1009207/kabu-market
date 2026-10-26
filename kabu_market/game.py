@@ -40,19 +40,20 @@ TURNIP_SHELF_DAYS = 14
 STREAK_BONUS = (7, 30)  # every 7th consecutive check-in day adds 30 coins
 # Potatoes are a sealed planting pool, not a market good. Harvest every 3 days at 20:00;
 # price per potato = SEED_COST * HARVEST_K * D / (D + total planted) * weather, where
-# every planter adds demand in proportion to what they planted, up to HARVEST_DEPTH at
-# HARVEST_FULL_STAKE seeds: a one-seed tester still counts, and an alt account buys
-# only as much demand as it pays for. Fewer than 2 planters: full refund.
-# Calibrated by a multi-player simulation: no fixed amount is always best, random
-# planting roughly breaks even, and nobody can see this period's total before harvest.
-# Scaled x4 from the simulated 10-coin / 25-seed / depth-30 / stake-5 design (the game
-# only depends on total / depth, so it is the same game with finer steps; the seed is
-# rounded down to 2 coins). PLANT_CAP is per person per period in one group.
+# D = HARVEST_PER_PLAYER x players who used /kabu in this group during the period,
+# planting or not. Demand must not grow with what is planted: when it did, every small
+# planter subsidised itself and splitting one stake over alt accounts paid (an external
+# audit found +80 instead of -4 for the same 100 seeds). Fewer than 2 planters: refund.
+# Calibrated by a multi-player simulation with wallets and rounded payouts, for fun as
+# much as balance: ordinary players break even in a mixed group (winning ~4 periods in
+# 10), random planting does not pay, greedy full planting does not pay, and a group that
+# agrees to plant with restraint wins ~3 periods in 4. Nobody sees this period's total.
+# PLANT_CAP is per person per period in one group.
 SEED_COST, PLANT_CAP = 2, 100
 PLANT_CLOSE_WINDOW = (
     2 * 3600
 )  # planting stops at a random moment this long before harvest
-HARVEST_DAYS, HARVEST_K, HARVEST_DEPTH, HARVEST_FULL_STAKE = 3, 1.8, 120, 20
+HARVEST_DAYS, HARVEST_K, HARVEST_PER_PLAYER = 3, 1.8, 45
 HARVEST_EPOCH = datetime(2026, 1, 1, 20, 0, tzinfo=TZ).timestamp()
 POTATO = "马铃薯"
 BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
@@ -80,7 +81,7 @@ PRODUCTS = (
         "大头菜",
         20.0,
         "turnip",
-        "每周走势不同（这周冲高还是一路跌要自己看）；每天都能买卖，买入 14 天后烂掉",
+        "每周走势不同（这周冲高还是一路跌要自己看）；每天都能买卖，但买入价不低于本周日的价；买入 14 天后烂掉",
     ),
     Product(
         "西红柿",
@@ -91,7 +92,8 @@ PRODUCTS = (
 )
 POTATO_TRAIT = (
     "不在市场买卖，用 /kabu plant 种。每 3 天晚上 8 点收获，本群这期一共种得越多，"
-    "每个卖得越便宜；别人种了多少，收获时才揭晓"
+    "每个卖得越便宜；这期在本群玩的人越多，卖得越贵；各家地里收成不同，"
+    "同一期有人赚有人亏；别人种了多少，收获时才揭晓"
 )
 
 SCHEMA = """
@@ -169,6 +171,11 @@ def fmt(value):
     return f"{value:.0f}" if value >= 100 else f"{value:.2f}"
 
 
+def fmt_quote(sell, buy):
+    """One number when buying and selling cost the same, else 'sell（买 buy）'."""
+    return fmt(sell) if fmt(buy) == fmt(sell) else f"{fmt(sell)}（买 {fmt(buy)}）"
+
+
 def time_left(seconds):
     if seconds >= DAY:
         return f"{int(seconds // DAY)} 天后"
@@ -241,6 +248,25 @@ class KabuMarket:
         day, half = slot_of(now)
         return getattr(self.engine, product.kind)(product.base, day, half)
 
+    def ask(self, product, now):
+        """System price when the system sells to a player, before impact.
+
+        Turnips are never sold below this week's Sunday price (as with the Sunday seller
+        in the original game), while selling to the system follows the weekly pattern.
+        Without this floor a cheap Saturday followed by the Sunday reset was a near-sure
+        overnight profit (an audit saw 9576 such trades and not one loss).
+        """
+        price = self.price(product, now)
+        if product.kind != "turnip":
+            return price
+        day, _half = slot_of(now)
+        return max(price, self.engine.turnip(product.base, week_start(day), 0))
+
+    def quote(self, product, scope_key, now):
+        """What a player sees: (sell-to-system price, buy price) with this group's impact."""
+        impact = self.impact(scope_key, product.name, now)
+        return self.price(product, now) * impact, self.ask(product, now) * impact
+
     def impact(self, scope_key, item, now):
         row = self.store.db.execute(
             "SELECT impact, updated_at FROM kabu_impact WHERE scope_key=? AND item=?",
@@ -309,10 +335,10 @@ class KabuMarket:
         """
         now = self.clock.now()
         key = event.scope.key
-        prices = {
-            p.name: round(self.price(p, now) * self.impact(key, p.name, now), 2)
-            for p in PRODUCTS
-        }
+        prices = {}
+        for p in PRODUCTS:
+            sell, buy = self.quote(p, key, now)
+            prices[p.name] = {"sell_to_system": round(sell, 2), "buy": round(buy, 2)}
         day = self.day(now)
         news = [
             f"{label}：{headline}"
@@ -584,17 +610,31 @@ class KabuMarket:
         return row[0]
 
     @staticmethod
-    def harvest_demand(seeds_by_planter):
-        return sum(
-            min(HARVEST_DEPTH, HARVEST_DEPTH * seeds / HARVEST_FULL_STAKE)
-            for seeds in seeds_by_planter
-        )
+    def harvest_demand(players):
+        return HARVEST_PER_PLAYER * players
+
+    def active_players(self, scope_key, period):
+        """Players who used /kabu in this group since the period began."""
+        start = self.harvest_at(period) - HARVEST_DAYS * DAY
+        return self.store.db.execute(
+            "SELECT count(*) FROM kabu_players WHERE scope_key=? AND seen_at>=?",
+            (scope_key, start),
+        ).fetchone()[0]
 
     def harvest_price(self, scope_key, period, total, depth):
-        """Price per potato and the weather factor (drawn only at harvest)."""
-        weather = self.engine.rng("weather", scope_key, period).gauss(-0.03, 0.25)
-        weather = max(0.5, min(1.8, math.exp(weather)))
-        return SEED_COST * HARVEST_K * depth / (depth + total) * weather, weather
+        """The group's price per potato before weather, and the shared weather factor."""
+        weather = self.engine.rng("weather", scope_key, period).gauss(-0.011, 0.15)
+        return SEED_COST * HARVEST_K * depth / (depth + total), math.exp(weather)
+
+    def plot_price(self, scope_key, period, user, group_price, weather):
+        """One planter's price: the group's, times shared weather and their own plot.
+
+        With one price for everyone a whole group won or lost together, so nobody beat
+        anybody and a loser had nothing to try differently. Each plot's luck averages 1,
+        so it changes who wins this time, not who comes out ahead in the long run.
+        """
+        luck = self.engine.rng("plot", scope_key, period, user).gauss(-0.02, 0.2)
+        return group_price * max(0.5, min(1.8, weather * math.exp(luck)))
 
     def _harvest(self, bot, now):
         """Inside a transaction: settle every finished period of this Bot's groups."""
@@ -610,16 +650,28 @@ class KabuMarket:
                 (key, period),
             ).fetchall()
             total = sum(r["seeds"] for r in plants)
-            depth = self.harvest_demand(r["seeds"] for r in plants)
+            players = max(self.active_players(key, period), len(plants))
+            depth = self.harvest_demand(players)
             refund = len(plants) < 2
             if refund:
                 price, weather = float(SEED_COST), 1.0
+                each = {p["user_id"]: price for p in plants}
             else:
                 price, weather = self.harvest_price(key, period, total, depth)
+                each = {
+                    p["user_id"]: self.plot_price(
+                        key, period, p["user_id"], price, weather
+                    )
+                    for p in plants
+                }
+            best, worst = max(each.values()), min(each.values())
             for plant in plants:
                 acct = self.account(bot, plant["user_id"], now)
                 cost = plant["seeds"] * SEED_COST
-                income = math.floor(plant["seeds"] * price)
+                mine = each[plant["user_id"]]
+                # rounded, not floored: flooring made a 3-seed planter at 2.05 a seed
+                # get 6 coins back for 6 spent, so small stakes almost never won
+                income = math.floor(plant["seeds"] * mine + 0.5)
                 acct["coins"] += income
                 if refund:
                     self._notify(
@@ -632,13 +684,22 @@ class KabuMarket:
                     self._notify(
                         acct,
                         f"土豆收获了：本群这期一共种了 {total} 个（{len(plants)} 人），"
-                        f"天气系数 {weather:.2f}，每个卖 {fmt(price)}；"
-                        f"你种了 {plant['seeds']} 个，收入 {income} 金币，{verdict}。",
+                        f"天气系数 {weather:.2f}；各家地里收成不同，"
+                        f"每个卖价最高 {fmt(best)}、最低 {fmt(worst)}。"
+                        f"你种了 {plant['seeds']} 个，每个卖 {fmt(mine)}，"
+                        f"收入 {income} 金币，{verdict}。",
                     )
                 self.save(acct)
             self.store.db.execute(
                 "INSERT OR REPLACE INTO kabu_harvests VALUES(?,?,?,?,?,?)",
-                (key, period, total, len(plants), price, weather),
+                (
+                    key,
+                    period,
+                    total,
+                    len(plants),
+                    sum(p["seeds"] * each[p["user_id"]] for p in plants) / total,
+                    weather,
+                ),
             )
             self.store.db.execute(
                 "DELETE FROM kabu_plants WHERE scope_key=? AND period=?", (key, period)
@@ -651,7 +712,12 @@ class KabuMarket:
             "SELECT * FROM kabu_harvests WHERE scope_key=? ORDER BY period DESC LIMIT 1",
             (scope_key,),
         ).fetchone()
-        facts = {"seed_cost": SEED_COST, "next_harvest": self.harvest_label(period)}
+        facts = {
+            "seed_cost": SEED_COST,
+            "next_harvest": self.harvest_label(period),
+            "players_this_period": self.active_players(scope_key, period),
+            "demand_per_player": HARVEST_PER_PLAYER,
+        }
         if last is not None:
             facts["last_harvest"] = {
                 "total_planted": last["total"],
@@ -889,7 +955,7 @@ class KabuMarket:
             coins = self.account(event.scope.bot_id, event.sender, now)["coins"]
         prices = "　".join(
             f"{p.name}({code_of(p.name)}) "
-            + fmt(self.price(p, now) * self.impact(event.scope.key, p.name, now))
+            + fmt_quote(*self.quote(p, event.scope.key, now))
             for p in PRODUCTS
         )
         prices += f"　{POTATO}(m) 种薯 {SEED_COST}"
@@ -903,18 +969,20 @@ class KabuMarket:
         _day, half = slot_of(now)
         lines = []
         for product in PRODUCTS:
-            impact = self.impact(event.scope.key, product.name, now)
-            quote = self.price(product, now) * impact
-            lines.append(
-                f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个"
-            )
+            sell, buy = self.quote(product, event.scope.key, now)
+            line = f"{product.name}（{code_of(product.name)}）：{fmt(sell)} 金币/个"
+            if fmt(buy) != fmt(sell):
+                line += f"，买入要 {fmt(buy)}（不低于本周日价）"
+            lines.append(line)
         public = self.potato_public(event.scope.key, now)
         potato = (
-            f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获"
+            f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获；"
+            f"这期已有 {public['players_this_period']} 人在本群玩，"
+            f"需求 D 目前是 {self.harvest_demand(public['players_this_period'])}"
         )
         last = public.get("last_harvest")
         if last:
-            potato += f"；上期本群共种 {last['total_planted']} 个，每个卖 {fmt(last['price_each'])}"
+            potato += f"；上期本群共种 {last['total_planted']} 个，平均每个卖 {fmt(last['price_each'])}"
         lines.append(potato)
         day = self.day(now)
         for when_day, label in ((day, "今天"), (day - 1, "昨天")):
@@ -966,7 +1034,7 @@ class KabuMarket:
 
     def buy(self, event, item, units, now):
         product = self.products[item]
-        price = self.price(product, now)
+        price = self.ask(product, now)
         bot, user, key = event.scope.bot_id, event.sender, event.scope.key
         with self.store.transaction():
             acct = self.account(bot, user, now)

@@ -67,10 +67,12 @@ def play(seed, smart):
                     coins += income
                     pnl[kind] += income - cost
                     del held[kind]
-            # then buy
+            # then buy (turnips are never sold below this week's Sunday price)
             for kind, price in prices.items():
                 if kind in held:
                     continue
+                if kind == "turnip":
+                    price = max(price, engine.turnip(BASES[kind], week_start(day), 0))
                 if smart:
                     if kind == "turnip":
                         want = day == week_start(day) and half == 0
