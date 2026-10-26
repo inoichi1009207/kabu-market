@@ -198,7 +198,7 @@ def help_text():
         "/kabu market 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
         "/kabu buy d 5　/kabu sell d 5（数量可写 all）　/kabu dump 清仓\n"
         f"/kabu plant 10：种土豆，种薯 {SEED_COST} 金币一个，每人每期最多 {PLANT_CAP} 个，只能在群里种；种得越多，你自己的收获价也越低\n"
-        "/kabu loan 500　/kabu repay 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
+        "/kabu loan 500　/kabu repay 500：借钱，最多借到身家的 3 倍，日息 1%；亏得太多，系统会卖掉你的货来还债\n"
         "/kabu offer @群友 d 5 25：向群友报价（单价 25），对方 /kabu ok 编号 成交，/kabu cancel 编号 撤回；卖方付 5% 手续费\n"
         "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。货物跟着你走，在哪个群都能卖。\n"
         "商品：\n" + goods
@@ -569,7 +569,8 @@ class KabuMarket:
             else "债务已还清。"
         )
         self._notify(
-            acct, f"你资不抵债，被强制平仓：存货卖得 {income} 金币，还债 {paid}，{rest}"
+            acct,
+            f"你亏得太多，系统卖掉了你的货来还债：卖得 {income} 金币，还债 {paid}，{rest}",
         )
 
     @staticmethod
@@ -1006,7 +1007,7 @@ class KabuMarket:
         text = f"金币 {acct['coins']}"
         if acct["debt"]:
             text += f"，欠款 {acct['debt']}（日息 1%）"
-        text += f"，净资产 {math.floor(worth)}（所有群合计，已扣欠款）。"
+        text += f"，身家 {math.floor(worth)}（金币加货，减掉欠款，所有群合计）。"
         if lots:
             text += "\n存货（跟着你走，在哪个群都能卖）："
             for lot in lots:
@@ -1108,14 +1109,14 @@ class KabuMarket:
             room = max(0, cap - acct["debt"])
             amount = room if amount is None else amount
             if amount <= 0 or amount > room:
-                return f"最多再借 {room} 金币（欠款合计不能超过净资产的 3 倍）。"
+                return f"最多再借 {room} 金币（欠款合计不能超过身家的 3 倍）。"
             acct["coins"] += amount
             acct["debt"] += amount
             acct["debt_day"] = self.day(now)
             self.save(acct)
         return (
             f"借到 {amount} 金币，现在欠款 {acct['debt']}，日息 1%。"
-            f"还能接着借，直到欠款合计到净资产的 3 倍；净资产跌到欠款的 {MARGIN:.0%} 以下会被强制平仓。"
+            f"还能接着借，最多借到身家的 3 倍；身家跌到欠款的 {MARGIN:.0%} 以下，系统会卖掉你的货来还债。"
         )
 
     def repay(self, event, args, now):
@@ -1253,4 +1254,4 @@ class KabuMarket:
         lines = [
             f"{i}. {name}：{worth}" for i, (worth, name) in enumerate(rows[:10], 1)
         ]
-        return "本群净资产排行（所有群合计，已扣欠款）：\n" + "\n".join(lines)
+        return "本群身家排行（金币加货，减掉欠款）：\n" + "\n".join(lines)
