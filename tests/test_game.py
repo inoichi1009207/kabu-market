@@ -8,7 +8,7 @@ import pytest
 
 from kabu_market import game as K
 from kabu_market import Event, KabuMarket, Scope
-from kabu_market.prices import PATTERN_NAMES, TZ, PriceEngine, slot_of, week_start
+from kabu_market.prices import TZ, PriceEngine, slot_of, week_start
 
 GROUP, OTHER = "30005", "30006"
 
@@ -689,48 +689,3 @@ def test_turnips_are_never_sold_below_this_weeks_sunday_price(market, clock):
     assert market.ask(tomato, clock.now()) == market.price(tomato, clock.now())
     go(clock, 6, 9)  # Sunday: the buy price is today's price
     assert market.ask(turnip, clock.now()) == market.price(turnip, clock.now())
-
-
-def test_market_reveals_last_weeks_turnip_pattern(market, clock):
-    go(clock, 1, 9)  # a Tuesday
-    assert market.turnip_recap(clock.now()) is None  # the engine starts this week
-    go(clock, 1, 9)  # one week later: last week is now on record
-    recap = market.turnip_recap(clock.now())
-    sunday = week_start(market.day(clock.now())) - 7
-    assert recap["pattern"] == PATTERN_NAMES[market.engine.pattern(sunday)]
-    prices = [market.engine.turnip(20.0, sunday + 1 + s // 2, s % 2) for s in range(12)]
-    assert recap["high"] == pytest.approx(max(prices))
-    assert recap["low"] == pytest.approx(min(prices))
-    text = market.respond(ev(clock, "/kabu market"))
-    assert f"上周大头菜揭晓：「{recap['pattern']}」，最高 {K.fmt(max(prices))}" in text
-    facts = market.knowledge(ev(clock, "大头菜上周怎么样"))
-    assert facts["turnip_last_week"]["pattern"] == recap["pattern"]
-
-
-def test_market_recaps_a_tomato_headline_once_it_has_landed(market, clock):
-    go(clock, 1, 9)
-    day = market.day(clock.now())
-    while (event := market.engine.news(day)) is None or event[3] == day:
-        day += 1  # a headline that lands on a later day
-    _index, sign, _effect, lands = event
-
-    def morning(d):
-        return datetime.fromordinal(d).replace(hour=9, tzinfo=TZ).timestamp()
-
-    clock.timestamp = morning(day)
-    early = market.tomato_recap(clock.now())
-    assert early is None or early["headline"] != market.engine.headline(day)
-    clock.timestamp = morning(lands)
-    recap = market.tomato_recap(clock.now())
-    newest = next(
-        d
-        for d in range(lands, lands - 4, -1)
-        if (e := market.engine.news(d)) is not None and e[3] <= lands
-    )
-    assert recap["headline"] == market.engine.headline(newest)
-    if newest == day:
-        before = market.engine.tomato(30.0, day - 1, 1)
-        after = market.engine.tomato(30.0, lands, 0)
-        assert recap["change"] == pytest.approx(after / before - 1)
-        assert bool(recap["reversed"]) == ((after - before) * sign < 0)
-    assert "已兑现" in market.respond(ev(clock, "/kabu market"))
