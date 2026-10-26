@@ -13,7 +13,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime
 
-from .prices import TZ, PriceEngine, slot_of, week_start
+from .prices import PATTERN_NAMES, TZ, PriceEngine, slot_of, week_start
 
 COMMAND = re.compile(r"/kabu(?:\s+(.*))?", re.S)
 DAY = 86400
@@ -56,6 +56,7 @@ PLANT_CLOSE_WINDOW = (
 HARVEST_DAYS, HARVEST_K, HARVEST_PER_PLAYER = 3, 1.8, 45
 HARVEST_EPOCH = datetime(2026, 1, 1, 20, 0, tzinfo=TZ).timestamp()
 POTATO = "马铃薯"
+WEEKDAYS = "一二三四五六日"
 BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
 ALL_WORDS = {"all", "全部"}
 # one-letter codes so players never switch input methods
@@ -195,7 +196,7 @@ def help_text():
         "大头菜市场（虚拟金币，所有群通用一个钱包）\n"
         f"第一次玩送 {STARTER_COINS} 金币。商品代号：大头菜 d、西红柿 x、马铃薯 m\n"
         f"/kabu sign：签到，每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
-        "/kabu market 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
+        "/kabu market 看价格（还会揭晓上周大头菜的走势、回顾已兑现的西红柿新闻）　/kabu bag 看仓库　/kabu rank 排行\n"
         "/kabu buy d 5　/kabu sell d 5（数量可写 all）　/kabu dump 清仓\n"
         f"/kabu plant 10：种土豆，种薯 {SEED_COST} 金币一个，每人每期最多 {PLANT_CAP} 个，只能在群里种；种得越多，你自己的收获价也越低\n"
         "/kabu loan 500　/kabu repay 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
@@ -349,8 +350,10 @@ class KabuMarket:
             "note": (
                 "Trusted read-only state of this chat's /kabu market mini-game (virtual coins). "
                 "Explain rules and quote numbers only from here. You may discuss strategy and give "
-                "your opinion on the asker's positions, framed as an opinion: you cannot see the "
-                "hidden weekly pattern or how a news item will land, so never promise a future price. "
+                "your opinion on the asker's positions, framed as an opinion: you cannot see "
+                "this week's hidden pattern or how a news item will land, so never promise a "
+                "future price (turnip_last_week and tomato_news_landed are past, already "
+                "public facts you may discuss). "
                 "Players trade only by sending /kabu commands themselves: never claim you bought, "
                 "sold, lent or checked in for anyone. 小道消息 rumours are unverified: never tell "
                 "players how often they are true, and do not confirm or deny one. A stated "
@@ -362,6 +365,9 @@ class KabuMarket:
             "rules": help_text(),
             "prices_now_in_this_chat": prices,
             "tomato_news": news,
+            # past facts only: last week's revealed turnip pattern, the latest landed news
+            "turnip_last_week": self.turnip_recap(now),
+            "tomato_news_landed": self.tomato_recap(now),
             "potato": self.potato_public(key, now),
         }
         row = self.store.db.execute(
@@ -985,16 +991,92 @@ class KabuMarket:
             potato += f"；上期本群共种 {last['total_planted']} 个，平均每个卖 {fmt(last['price_each'])}"
         lines.append(potato)
         day = self.day(now)
+        landed = self.tomato_recap(now)
+        outcome = ""
+        if landed:
+            outcome = (
+                f"已兑现：从 {fmt(landed['from'])} 到 {fmt(landed['to'])}"
+                f"（{landed['change']:+.0%}）"
+                + (f"，{landed['reversed']}" if landed["reversed"] else "")
+            )
         for when_day, label in ((day, "今天"), (day - 1, "昨天")):
             headline = self.engine.headline(when_day)
             if headline:
-                lines.append(f"{label}的西红柿新闻：{headline}")
+                line = f"{label}的西红柿新闻：{headline}"
+                if landed and landed["day"] == when_day:
+                    line += f"——{outcome}"
+                    landed = None
+                lines.append(line)
+        if landed:  # an older headline that landed since
+            lines.append(
+                f"{landed['published']}的西红柿新闻「{landed['headline']}」{outcome}"
+            )
+        recap = self.turnip_recap(now)
+        if recap:
+            lines.append(
+                f"上周大头菜揭晓：「{recap['pattern']}」，最高 {fmt(recap['high'])}"
+                f"（{recap['high_at']}），最低 {fmt(recap['low'])}（{recap['low_at']}）"
+            )
         when = "上午" if half == 0 else "下午"
         return (
             f"本群{when}的市场价格：\n"
             + "\n".join(lines)
             + "\n在本群买得越多价格越高，卖得越多价格越低。发 /kabu help 看各商品的脾气。"
         )
+
+    # -- after-the-fact reveals: a loser should see what they could have done ---------
+
+    def turnip_recap(self, now):
+        """Last week's hidden turnip pattern and its best and worst system prices."""
+        sunday = week_start(self.day(now)) - 7
+        if sunday < self.engine.start_week:
+            return None
+        base = self.products["大头菜"].base
+        slots = []
+        for step in range(12):  # Monday morning .. Saturday afternoon
+            day, half = sunday + 1 + step // 2, step % 2
+            label = f"周{WEEKDAYS[datetime.fromordinal(day).weekday()]}{'上午' if half == 0 else '下午'}"
+            slots.append((self.engine.turnip(base, day, half), label))
+        (high, high_at), (low, low_at) = max(slots), min(slots)
+        return {
+            "pattern": PATTERN_NAMES[self.engine.pattern(sunday)],
+            "high": high,
+            "high_at": high_at,
+            "low": low,
+            "low_at": low_at,
+        }
+
+    def tomato_recap(self, now):
+        """The latest tomato headline of the last few days whose effect has landed.
+
+        Only past prices are used (the day before the headline vs. the landing morning),
+        so this reveals nothing a careful player could not have worked out.
+        """
+        today = self.day(now)
+        base = self.products["西红柿"].base
+        for day in range(today, today - 4, -1):
+            event = self.engine.news(day)
+            if event is None or event[3] > today:
+                continue
+            _index, sign, _effect, lands = event
+            before = self.engine.tomato(base, day - 1, 1)
+            after = self.engine.tomato(base, lands, 0)
+            change = after / before - 1
+            reversed_ = ""
+            if change * sign < 0:
+                reversed_ = "利好出尽，反而跌了" if sign > 0 else "利空出尽，反而涨了"
+            return {
+                "day": day,
+                "headline": self.engine.headline(day),
+                "published": {0: "今天", 1: "昨天", 2: "前天"}.get(
+                    today - day, f"{today - day} 天前"
+                ),
+                "from": before,
+                "to": after,
+                "change": change,
+                "reversed": reversed_,
+            }
+        return None
 
     def inventory(self, event, _args, now):
         bot, user = event.scope.bot_id, event.sender
