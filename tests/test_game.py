@@ -416,3 +416,34 @@ def test_rumours_never_tell_players_how_reliable_they_are(market, clock, monkeyp
     assert "小道消息：听说" in text
     for hint in ("假", "不一定", "真"):
         assert hint not in text and hint not in K.help_text()
+
+
+def test_short_ascii_commands_and_item_codes(market, clock):
+    go(clock, 0)
+    assert "签到成功" in market.respond(ev(clock, "/kabu sign"))
+    give(market, 10_000)
+    assert "买了 3 个大头菜" in market.respond(ev(clock, "/kabu buy d 3"))
+    assert "买了 2 个西红柿" in market.respond(ev(clock, "/kabu B X*2"))
+    assert "买了 1 个马铃薯" in market.respond(ev(clock, "/kabu buy m"))
+    assert "卖出 1 个大头菜" in market.respond(ev(clock, "/kabu sell d 1"))
+    assert "大头菜（d）" in market.respond(ev(clock, "/kabu mkt"))
+    assert "2 个大头菜" in market.respond(ev(clock, "/kabu bag"))
+    assert "借到 100" in market.respond(ev(clock, "/kabu loan 100"))
+    assert "还款 100" in market.respond(ev(clock, "/kabu repay all"))
+    unit = math.ceil(market.price(market.products["马铃薯"], clock.now()))
+    text = market.respond(ev(clock, f"/kabu offer m 1 {unit}", mentions=["u2"]))
+    assert "/kabu ok 1" in text
+    assert "成交" in market.respond(ev(clock, "/kabu ok 1", sender="u2"))
+    market.respond(
+        ev(
+            clock,
+            f"/kabu offer x 1 {math.ceil(market.price(market.products['西红柿'], clock.now()))}",
+            mentions=["u2"],
+        )
+    )
+    assert "已撤回" in market.respond(ev(clock, "/kabu cancel 2"))
+    assert "本群净资产排行" in market.respond(ev(clock, "/kabu rank"))
+    assert "卖出" in market.respond(ev(clock, "/kabu dump"))
+    help_text = market.respond(ev(clock, "/kabu"))
+    assert "/kabu sign" in help_text and "/kabu buy d 5" in help_text
+    assert "没有这种商品" in market.respond(ev(clock, "/kabu buy q 1"))

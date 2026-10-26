@@ -32,7 +32,10 @@ STARTER_COINS = 100  # once per person (all groups), on the first /kabu
 SEED_KEY = "kabu_seed_v2"
 TURNIP_SHELF_DAYS = 7
 STREAK_BONUS = (7, 30)  # every 7th consecutive check-in day adds 30 coins
-BUY_WORDS, SELL_WORDS = {"买", "买入", "buy"}, {"卖", "卖出", "sell"}
+BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
+ALL_WORDS = {"all", "全部"}
+# one-letter codes so players never switch input methods
+ITEM_CODES = {"d": "大头菜", "x": "西红柿", "m": "马铃薯"}
 TURNIP_TIPS = (
     "这周大头菜会忽高忽低",
     "这周大头菜要冲一波大的",
@@ -131,16 +134,20 @@ def time_left(seconds):
     return "1 小时内"
 
 
+def code_of(name):
+    return next(code for code, item in ITEM_CODES.items() if item == name)
+
+
 def help_text():
-    goods = "\n".join(f"· {p.name}：{p.trait}" for p in PRODUCTS)
+    goods = "\n".join(f"· {p.name}（{code_of(p.name)}）：{p.trait}" for p in PRODUCTS)
     return (
         "大头菜市场（虚拟金币，所有群通用一个钱包）\n"
-        f"第一次玩送 {STARTER_COINS} 金币；/kabu 签到：每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
-        "/kabu 市场　/kabu 仓库　/kabu 排行\n"
-        "/kabu 买 大头菜 5　/kabu 卖 大头菜 5（数量可写“全部”）\n"
-        "/kabu 清仓：把本群的存货一次卖光\n"
-        "/kabu 借 500　/kabu 还 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
-        "/kabu 卖给 @群友 大头菜 5 单价 25 → 对方 /kabu 接受 编号（卖方付 5% 手续费）\n"
+        f"第一次玩送 {STARTER_COINS} 金币。商品代号：大头菜 d、西红柿 x、马铃薯 m\n"
+        f"/kabu sign：签到，每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
+        "/kabu mkt 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
+        "/kabu buy d 5　/kabu sell d 5（数量可写 all）　/kabu dump 清仓\n"
+        "/kabu loan 500　/kabu repay 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
+        "/kabu offer @群友 d 5 25：向群友报价（单价 25），对方 /kabu ok 编号 成交，/kabu cancel 编号 撤回；卖方付 5% 手续费\n"
         "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。\n"
         "商品：\n" + goods
     )
@@ -456,8 +463,21 @@ class KabuMarket:
         self.maintain(event, now)
         match = COMMAND.fullmatch(event.text.strip())
         args = (match.group(1) or "").split() if match else []
-        sub = args[0] if args else "帮助"
+        sub = args[0].lower() if args else "help"
         handlers = {
+            "sign": self.checkin,
+            "mkt": self.market,
+            "market": self.market,
+            "bag": self.inventory,
+            "rank": self.ranking,
+            "loan": self.borrow,
+            "repay": self.repay,
+            "offer": self.offer,
+            "dump": self.clear_out,
+            "ok": self.accept,
+            "accept": self.accept,
+            "cancel": self.withdraw,
+            # Chinese aliases from the first versions keep working
             "签到": self.checkin,
             "市场": self.market,
             "行情": self.market,
@@ -475,7 +495,7 @@ class KabuMarket:
             "接受": self.accept,
             "撤回": self.withdraw,
         }
-        if sub in {"帮助", "help", "玩法"}:
+        if sub in {"help", "h", "帮助", "玩法"}:
             text = help_text()
         elif sub in handlers:
             text = handlers[sub](event, args[1:], now)
@@ -487,7 +507,7 @@ class KabuMarket:
                 trade = self.buy if sub in BUY_WORDS else self.sell
                 text = trade(event, *parsed, now)
         else:
-            text = "没有这个用法。发 /kabu 看玩法。"
+            text = "没有这个用法。发 /kabu help 看玩法。"
         with self.store.transaction():
             acct = self.account(event.scope.bot_id, event.sender, now)
             if acct["notice"]:
@@ -499,14 +519,20 @@ class KabuMarket:
             text = "@" + name + " " + text
         return text
 
+    def item_name(self, word):
+        """Item code (d / x / m, any case) or full name -> product name, else None."""
+        name = ITEM_CODES.get(word.lower(), word)
+        return name if name in self.products else None
+
     def parse_trade(self, args):
         joined = " ".join(args)
-        match = re.fullmatch(r"(\S+?)\s*(?:[*xX×]\s*|\s+)(\d+|全部|all)", joined)
-        item, amount = (match.group(1), match.group(2)) if match else (joined, "1")
-        if item not in self.products:
-            names = "、".join(self.products)
-            return f"没有这种商品。可以买卖：{names}。" if item else "用法：/kabu 买 大头菜 5"
-        if amount in {"全部", "all"}:
+        match = re.fullmatch(r"(\S+?)\s*(?:[*×]\s*|\s+)(\d+|全部|all)", joined, re.I)
+        word, amount = (match.group(1), match.group(2)) if match else (joined, "1")
+        item = self.item_name(word)
+        if item is None:
+            names = "、".join(f"{name} {code}" for code, name in ITEM_CODES.items())
+            return f"没有这种商品。可以买卖：{names}。" if word else "用法：/kabu buy d 5"
+        if amount.lower() in ALL_WORDS:
             return item, None
         units = int(amount)
         if not 1 <= units <= MAX_UNITS:
@@ -517,7 +543,7 @@ class KabuMarket:
     def _amount(args):
         if not args:
             return "missing"
-        if args[0] in {"全部", "all"}:
+        if args[0].lower() in ALL_WORDS:
             return None
         return int(args[0]) if args[0].isdigit() and int(args[0]) > 0 else "invalid"
 
@@ -588,7 +614,7 @@ class KabuMarket:
         for product in PRODUCTS:
             impact = self.impact(event.scope.key, product.name, now)
             quote = self.price(product, now) * impact
-            lines.append(f"{product.name}：{fmt(quote)} 金币/个")
+            lines.append(f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个")
         day = self.day(now)
         for when_day, label in ((day, "今天"), (day - 1, "昨天")):
             headline = self.engine.headline(when_day)
@@ -598,7 +624,7 @@ class KabuMarket:
         return (
             f"本群{when}的市场价格：\n"
             + "\n".join(lines)
-            + "\n在本群买得越多价格越高，卖得越多价格越低。发 /kabu 看各商品的脾气。"
+            + "\n在本群买得越多价格越高，卖得越多价格越低。发 /kabu help 看各商品的脾气。"
         )
 
     def inventory(self, event, _args, now):
@@ -626,7 +652,7 @@ class KabuMarket:
             gone = "、".join(f"{n} 个{i}" for i, n in rotten.items())
             text += f"\n刚刚烂掉：{gone}。"
         if not acct["coins"] and not lots and not acct["debt"]:
-            text += "\n发 /kabu 签到 领今天的金币。"
+            text += "\n发 /kabu sign 领今天的金币。"
         return text
 
     def buy(self, event, item, units, now):
@@ -697,7 +723,7 @@ class KabuMarket:
     def borrow(self, event, args, now):
         amount = self._amount(args)
         if isinstance(amount, str):
-            return "用法：/kabu 借 500（或 /kabu 借 全部）"
+            return "用法：/kabu loan 500（或 /kabu loan all）"
         with self.store.transaction():
             acct = self.account(event.scope.bot_id, event.sender, now)
             cap = math.floor(self.net_worth(acct, now) * (LEVERAGE - 1))
@@ -717,7 +743,7 @@ class KabuMarket:
     def repay(self, event, args, now):
         amount = self._amount(args)
         if isinstance(amount, str):
-            return "用法：/kabu 还 500（或 /kabu 还 全部）"
+            return "用法：/kabu repay 500（或 /kabu repay all）"
         with self.store.transaction():
             acct = self.account(event.scope.bot_id, event.sender, now)
             if not acct["debt"]:
@@ -740,22 +766,22 @@ class KabuMarket:
         return row["name"] if row and row["name"] else "对方"
 
     def offer(self, event, args, now):
-        usage = "用法：/kabu 卖给 @群友 大头菜 5 单价 25（只能 @ 一位别人）"
+        usage = "用法：/kabu offer @群友 d 5 25（商品、数量、单价；只能 @ 一位别人）"
         if event.scope.kind != "group":
             return "只能在群里卖给群友。"
         bot, seller, key = event.scope.bot_id, event.sender, event.scope.key
         targets = [m for m in event.mentions if m and m != bot]
         if len(targets) != 1 or targets[0] == seller:
             return usage
-        rest = [a for a in args if a != "单价"]
+        rest = [a for a in args if a not in {"单价", "price", "@"}]
         if (
             len(rest) != 3
-            or rest[0] not in self.products
+            or self.item_name(rest[0]) is None
             or not rest[1].isdigit()
             or not rest[2].isdigit()
         ):
             return usage
-        item, units, unit_price = rest[0], int(rest[1]), int(rest[2])
+        item, units, unit_price = self.item_name(rest[0]), int(rest[1]), int(rest[2])
         if not 1 <= units <= MAX_UNITS:
             return f"每次数量要在 1–{MAX_UNITS} 之间。"
         market = self.price(self.products[item], now) * self.impact(key, item, now)
@@ -788,7 +814,7 @@ class KabuMarket:
         return (
             f"报价 #{ident}：卖给 @{buyer} {units} 个{item}，单价 {unit_price}，"
             f"共 {units * unit_price} 金币（手续费 5% 由卖方出）。"
-            f"对方发 /kabu 接受 {ident}，30 分钟内有效。"
+            f"对方发 /kabu ok {ident}，30 分钟内有效。"
         )
 
     def _offer_row(self, event, args):
