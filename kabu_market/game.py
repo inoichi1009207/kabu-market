@@ -58,6 +58,7 @@ HARVEST_EPOCH = datetime(2026, 1, 1, 20, 0, tzinfo=TZ).timestamp()
 POTATO = "马铃薯"
 BUY_WORDS, SELL_WORDS = {"buy", "b", "买", "买入"}, {"sell", "s", "卖", "卖出"}
 ALL_WORDS = {"all", "全部"}
+COIN_AMOUNT = r"\d+(?:\.\d{1,2})?"  # coins go to the cent
 # one-letter codes so players never switch input methods
 ITEM_CODES = {"d": "大头菜", "x": "西红柿", "m": "马铃薯"}
 TURNIP_TIPS = (
@@ -167,8 +168,19 @@ CREATE TABLE IF NOT EXISTS kabu_offers (
 """
 
 
+def cents(value):
+    """Coins are kept to the cent (0.01), rounded half up."""
+    return math.floor(value * 100 + 0.5 + 1e-9) / 100
+
+
+def money(value):
+    """Every amount is shown to the cent: 31.00, 30.24."""
+    return f"{cents(value):.2f}"
+
+
 def fmt(value):
-    return f"{value:.0f}" if value >= 100 else f"{value:.2f}"
+    """Prices too, however large."""
+    return f"{value:.2f}"
 
 
 def weather_word(weather):
@@ -202,11 +214,11 @@ def help_text():
     goods += f"\n· {POTATO}（m）：{POTATO_TRAIT}"
     return (
         "大头菜市场（虚拟金币，所有群通用一个钱包）\n"
-        f"第一次玩送 {STARTER_COINS} 金币。商品代号：大头菜 d、西红柿 x、马铃薯 m\n"
+        f"第一次玩送 {money(STARTER_COINS)} 金币。商品代号：大头菜 d、西红柿 x、马铃薯 m\n"
         f"/kabu sign：签到，每天一次，领 {CHECKIN_RANGE[0]}–{CHECKIN_RANGE[1]} 金币，偶尔附带小道消息\n"
         "/kabu market 看价格　/kabu bag 看仓库　/kabu rank 排行\n"
         "/kabu buy d 5　/kabu sell d 5（数量可写 all）　/kabu dump 清仓\n"
-        f"/kabu plant 10：种土豆，种薯 {SEED_COST} 金币一个，每人每期最多 {PLANT_CAP} 个，只能在群里种；种得越多，你自己的收获价也越低\n"
+        f"/kabu plant 10：种土豆，种薯 {money(SEED_COST)} 金币一个，每人每期最多 {PLANT_CAP} 个，只能在群里种；种得越多，你自己的收获价也越低\n"
         "/kabu loan 500　/kabu repay 500：可以多次借，欠款合计最多到净资产的 3 倍（4 倍杠杆），日息 1%，资不抵债会被强制平仓\n"
         "/kabu offer @群友 d 5 25：向群友报价（单价 25），对方 /kabu ok 编号 成交，/kabu cancel 编号 撤回；卖方付 5% 手续费\n"
         "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。货物跟着你走，在哪个群都能卖。\n"
@@ -300,7 +312,7 @@ class KabuMarket:
         for _ in range(units):
             total += price * impact
             impact = min(IMPACT_BOUNDS[1], impact * IMPACT_STEP)
-        return math.ceil(total - 1e-9), impact
+        return cents(total), impact
 
     @staticmethod
     def sell_income(price, impact, units):
@@ -313,7 +325,7 @@ class KabuMarket:
         for _ in range(units):
             impact = max(IMPACT_BOUNDS[0], impact / IMPACT_STEP)
             total += price * impact
-        return math.floor(total * (1 - SELL_SPREAD) + 1e-9), impact
+        return cents(total * (1 - SELL_SPREAD)), impact
 
     # -- accounts -----------------------------------------------------------------
 
@@ -332,7 +344,7 @@ class KabuMarket:
         today = self.day(now)
         if acct["debt"] and acct["debt_day"] is not None and today > acct["debt_day"]:
             days = today - acct["debt_day"]
-            acct["debt"] = math.ceil(acct["debt"] * (1 + LOAN_RATE) ** days)
+            acct["debt"] = cents(acct["debt"] * (1 + LOAN_RATE) ** days)
         if acct["debt"]:
             acct["debt_day"] = today
         return acct
@@ -385,7 +397,7 @@ class KabuMarket:
             facts["asker"] = {
                 "coins": acct["coins"],
                 "debt": acct["debt"],
-                "net_assets": math.floor(self.net_worth(acct, now)),
+                "net_assets": cents(self.net_worth(acct, now)),
                 "goods": here,
                 "potatoes_planted_unharvested": self._planted(
                     event.scope.bot_id, event.sender
@@ -398,8 +410,8 @@ class KabuMarket:
         self.store.db.execute(
             "UPDATE kabu_accounts SET coins=?,debt=?,debt_day=?,checkin_day=?,streak=?,skip_week=?,notice=? WHERE bot_id=? AND user_id=?",
             (
-                acct["coins"],
-                acct["debt"],
+                cents(acct["coins"]),
+                cents(acct["debt"]),
                 acct["debt_day"] if acct["debt"] else None,
                 acct["checkin_day"],
                 acct["streak"],
@@ -509,7 +521,7 @@ class KabuMarket:
                     bot,
                     event.sender,
                     STARTER_COINS,
-                    f"欢迎来到大头菜市场！送你 {STARTER_COINS} 金币当本钱。",
+                    f"欢迎来到大头菜市场！送你 {money(STARTER_COINS)} 金币当本钱。",
                 ),
             )
             self.store.db.execute(
@@ -573,12 +585,13 @@ class KabuMarket:
         acct["coins"] -= paid
         acct["debt"] -= paid
         rest = (
-            f"还欠 {acct['debt']} 金币，之后签到所得一半自动还债。"
+            f"还欠 {money(acct['debt'])} 金币，之后签到所得一半自动还债。"
             if acct["debt"]
             else "债务已还清。"
         )
         self._notify(
-            acct, f"你资不抵债，被强制平仓：存货卖得 {income} 金币，还债 {paid}，{rest}"
+            acct,
+            f"你资不抵债，被强制平仓：存货卖得 {money(income)} 金币，还债 {money(paid)}，{rest}",
         )
 
     @staticmethod
@@ -678,25 +691,25 @@ class KabuMarket:
                 acct = self.account(bot, plant["user_id"], now)
                 cost = plant["seeds"] * SEED_COST
                 mine = each[plant["user_id"]]
-                # rounded, not floored: flooring made a 3-seed planter at 2.05 a seed
-                # get 6 coins back for 6 spent, so small stakes almost never won
-                income = math.floor(plant["seeds"] * mine + 0.5)
+                income = cents(plant["seeds"] * mine)  # paid to the cent
                 acct["coins"] += income
                 if refund:
                     self._notify(
                         acct,
-                        f"这期土豆没开张：本群只有你一个人种，{plant['seeds']} 个种薯的 {cost} 金币已退回。",
+                        f"这期土豆没开张：本群只有你一个人种，{plant['seeds']} 个种薯的 {money(cost)} 金币已退回。",
                     )
                 else:
-                    gain = income - cost
-                    verdict = f"赚了 {gain}" if gain >= 0 else f"亏了 {-gain}"
+                    gain = cents(income - cost)
+                    verdict = (
+                        f"赚了 {money(gain)}" if gain >= 0 else f"亏了 {money(-gain)}"
+                    )
                     self._notify(
                         acct,
                         f"土豆收获了：本群这期一共种了 {total} 个（{len(plants)} 人），"
                         f"{weather_word(weather)}；各家地里收成不同，"
                         f"每个卖价最高 {fmt(best)}、最低 {fmt(worst)}。"
                         f"你种了 {plant['seeds']} 个，每个卖 {fmt(mine)}，"
-                        f"收入 {income} 金币，{verdict}。",
+                        f"收入 {money(income)} 金币，{verdict}。",
                     )
                 self.save(acct)
             self.store.db.execute(
@@ -740,7 +753,7 @@ class KabuMarket:
             return "土豆只能在群里种：收获价看全群一共种了多少，得和群友一起玩。"
         amount = self._amount(args)
         if isinstance(amount, str):
-            return f"用法：/kabu plant 10（种薯 {SEED_COST} 金币一个，每期最多 {PLANT_CAP} 个）"
+            return f"用法：/kabu plant 10（种薯 {money(SEED_COST)} 金币一个，每期最多 {PLANT_CAP} 个）"
         bot, user, key = event.scope.bot_id, event.sender, event.scope.key
         period = self.period(now)
         if now >= self.planting_closes_at(key, period):
@@ -764,7 +777,7 @@ class KabuMarket:
                 return f"这期你在本群最多还能种 {room} 个。"
             cost = seeds * SEED_COST
             if seeds <= 0 or cost > acct["coins"]:
-                return f"金币不够：种 {max(seeds, 1)} 个要 {max(cost, SEED_COST)} 金币，你有 {acct['coins']}。"
+                return f"金币不够：种 {max(seeds, 1)} 个要 {money(max(cost, SEED_COST))} 金币，你有 {money(acct['coins'])}。"
             acct["coins"] -= cost
             self.save(acct)
             self.store.db.execute(
@@ -859,7 +872,7 @@ class KabuMarket:
         word, amount = (match.group(1), match.group(2)) if match else (joined, "1")
         item = self.item_name(word)
         if ITEM_CODES.get(word.lower(), word) == POTATO:
-            return f"马铃薯不在市场买卖，改成种了：/kabu plant 10（种薯 {SEED_COST} 金币一个）"
+            return f"马铃薯不在市场买卖，改成种了：/kabu plant 10（种薯 {money(SEED_COST)} 金币一个）"
         if item is None:
             names = "、".join(f"{name} {code}" for code, name in ITEM_CODES.items())
             return (
@@ -873,12 +886,16 @@ class KabuMarket:
         return item, units
 
     @staticmethod
-    def _amount(args):
+    def _amount(args, *, coins=False):
+        """A positive count, or a coin amount with up to two decimals when ``coins``."""
         if not args:
             return "missing"
         if args[0].lower() in ALL_WORDS:
             return None
-        return int(args[0]) if args[0].isdigit() and int(args[0]) > 0 else "invalid"
+        if not re.fullmatch(COIN_AMOUNT if coins else r"\d+", args[0]):
+            return "invalid"
+        value = float(args[0]) if coins else int(args[0])
+        return value if value > 0 else "invalid"
 
     def tip(self, now):
         """A rumour about any good; true or false with equal odds."""
@@ -924,7 +941,7 @@ class KabuMarket:
             acct = self.account(bot, user, now)
             last = acct["checkin_day"]
             if last == today:
-                return f"今天已经签到过了，明天再来。你现在有 {acct['coins']} 金币。"
+                return f"今天已经签到过了，明天再来。你现在有 {money(acct['coins'])} 金币。"
             if last == today - 1:
                 acct["streak"] += 1
             elif last == today - 2 and acct["skip_week"] != week:
@@ -936,7 +953,7 @@ class KabuMarket:
             gained = self.random.randint(*CHECKIN_RANGE)
             bonus = STREAK_BONUS[1] if acct["streak"] % STREAK_BONUS[0] == 0 else 0
             gained += bonus
-            repaid = min(acct["debt"], gained // 2)
+            repaid = min(acct["debt"], cents(gained / 2))
             acct["debt"] -= repaid
             acct["coins"] += gained - repaid
             acct["checkin_day"] = today
@@ -945,12 +962,12 @@ class KabuMarket:
                 "SELECT item, sum(quantity) AS n FROM kabu_stock WHERE bot_id=? AND user_id=? AND expires_at IS NOT NULL AND expires_at>? AND expires_at<=? GROUP BY item",
                 (bot, user, now, now + DAY),
             ).fetchall()
-        head = f"签到成功，获得 {gained} 金币"
+        head = f"签到成功，获得 {money(gained)} 金币"
         if bonus:
-            head += f"（含连签 {acct['streak']} 天奖励 {bonus}）"
+            head += f"（含连签 {acct['streak']} 天奖励 {money(bonus)}）"
         if repaid:
-            head += f"（其中 {repaid} 自动还债）"
-        head += f"，现在共有 {acct['coins']} 金币，已连签 {acct['streak']} 天。"
+            head += f"（其中 {money(repaid)} 自动还债）"
+        head += f"，现在共有 {money(acct['coins'])} 金币，已连签 {acct['streak']} 天。"
         lines.insert(0, head)
         for row in soon:
             lines.append(f"提醒：你有 {row['n']} 个{row['item']}一天内就要烂了。")
@@ -967,9 +984,9 @@ class KabuMarket:
             + fmt_quote(*self.quote(p, event.scope.key, now))
             for p in PRODUCTS
         )
-        prices += f"　{POTATO}(m) 种薯 {SEED_COST}"
+        prices += f"　{POTATO}(m) 种薯 {money(SEED_COST)}"
         return (
-            f"你有 {coins} 金币｜{prices}\n"
+            f"你有 {money(coins)} 金币｜{prices}\n"
             "常用：/kabu sign 签到 · buy d 5 · sell d 5 · plant 5 种土豆 · market 行情\n"
             "发 /kabu help 看全部玩法"
         )
@@ -985,7 +1002,7 @@ class KabuMarket:
             lines.append(line)
         public = self.potato_public(event.scope.key, now)
         potato = (
-            f"{POTATO}（m）：种薯 {SEED_COST} 金币/个，{public['next_harvest']}收获；"
+            f"{POTATO}（m）：种薯 {money(SEED_COST)} 金币/个，{public['next_harvest']}收获；"
             f"这期已有 {public['players_this_period']} 人在本群玩，玩的人越多土豆卖得越贵"
         )
         last = public.get("last_harvest")
@@ -1012,10 +1029,10 @@ class KabuMarket:
             self.save(acct)
             lots = self._stock(bot, user)
             worth = self.net_worth(acct, now)
-        text = f"金币 {acct['coins']}"
+        text = f"金币 {money(acct['coins'])}"
         if acct["debt"]:
-            text += f"，欠款 {acct['debt']}（日息 1%）"
-        text += f"，净资产 {math.floor(worth)}（所有群合计，已扣欠款）。"
+            text += f"，欠款 {money(acct['debt'])}（日息 1%）"
+        text += f"，净资产 {money(worth)}（所有群合计，已扣欠款）。"
         if lots:
             text += "\n存货（跟着你走，在哪个群都能卖）："
             for lot in lots:
@@ -1055,10 +1072,10 @@ class KabuMarket:
                 ):
                     units += 1
                 if units == 0:
-                    return f"你的 {acct['coins']} 金币一个{item}都买不起。"
+                    return f"你的 {money(acct['coins'])} 金币一个{item}都买不起。"
             cost, after = self.buy_cost(price, impact, units)
             if cost > acct["coins"]:
-                return f"金币不够：买 {units} 个{item}要 {cost} 金币，你只有 {acct['coins']} 金币。"
+                return f"金币不够：买 {units} 个{item}要 {money(cost)} 金币，你只有 {money(acct['coins'])} 金币。"
             acct["coins"] -= cost
             self.save(acct)
             self._set_impact(key, item, after, now)
@@ -1069,7 +1086,7 @@ class KabuMarket:
             self._put(bot, user, key, item, [lot])
         tail = f"，{TURNIP_SHELF_DAYS} 天后烂掉" if product.kind == "turnip" else ""
         return (
-            f"花 {cost} 金币买了 {units} 个{item}{tail}，剩 {acct['coins']} 金币。"
+            f"花 {money(cost)} 金币买了 {units} 个{item}{tail}，剩 {money(acct['coins'])} 金币。"
             f"本群现价涨到 {fmt(price * after)}。"
         )
 
@@ -1093,7 +1110,7 @@ class KabuMarket:
             self.save(acct)
             self._set_impact(key, item, after, now)
         return (
-            f"卖出 {units} 个{item}，得到 {income} 金币，现在共有 {acct['coins']} 金币。"
+            f"卖出 {units} 个{item}，得到 {money(income)} 金币，现在共有 {money(acct['coins'])} 金币。"
             f"本群现价跌到 {fmt(price * after)}。"
         )
 
@@ -1108,27 +1125,27 @@ class KabuMarket:
         return "\n".join(self.sell(event, item, None, now) for item in goods)
 
     def borrow(self, event, args, now):
-        amount = self._amount(args)
+        amount = self._amount(args, coins=True)
         if isinstance(amount, str):
             return "用法：/kabu loan 500（或 /kabu loan all）"
         with self.store.transaction():
             acct = self.account(event.scope.bot_id, event.sender, now)
-            cap = math.floor(self.net_worth(acct, now) * (LEVERAGE - 1))
-            room = max(0, cap - acct["debt"])
+            cap = math.floor(self.net_worth(acct, now) * (LEVERAGE - 1) * 100) / 100
+            room = max(0, cents(cap - acct["debt"]))
             amount = room if amount is None else amount
             if amount <= 0 or amount > room:
-                return f"最多再借 {room} 金币（欠款合计不能超过净资产的 3 倍）。"
+                return f"最多再借 {money(room)} 金币（欠款合计不能超过净资产的 3 倍）。"
             acct["coins"] += amount
             acct["debt"] += amount
             acct["debt_day"] = self.day(now)
             self.save(acct)
         return (
-            f"借到 {amount} 金币，现在欠款 {acct['debt']}，日息 1%。"
+            f"借到 {money(amount)} 金币，现在欠款 {money(acct['debt'])}，日息 1%。"
             f"还能接着借，直到欠款合计到净资产的 3 倍；净资产跌到欠款的 {MARGIN:.0%} 以下会被强制平仓。"
         )
 
     def repay(self, event, args, now):
-        amount = self._amount(args)
+        amount = self._amount(args, coins=True)
         if isinstance(amount, str):
             return "用法：/kabu repay 500（或 /kabu repay all）"
         with self.store.transaction():
@@ -1142,8 +1159,8 @@ class KabuMarket:
             acct["coins"] -= pay
             acct["debt"] -= pay
             self.save(acct)
-        left = f"还欠 {acct['debt']}。" if acct["debt"] else "债务已还清。"
-        return f"还款 {pay} 金币，{left}剩 {acct['coins']} 金币。"
+        left = f"还欠 {money(acct['debt'])}。" if acct["debt"] else "债务已还清。"
+        return f"还款 {money(pay)} 金币，{left}剩 {money(acct['coins'])} 金币。"
 
     def _name(self, scope_key, user):
         row = self.store.db.execute(
@@ -1165,17 +1182,21 @@ class KabuMarket:
             len(rest) != 3
             or self.item_name(rest[0]) is None
             or not rest[1].isdigit()
-            or not rest[2].isdigit()
+            or not re.fullmatch(COIN_AMOUNT, rest[2])
         ):
             return usage
-        item, units, unit_price = self.item_name(rest[0]), int(rest[1]), int(rest[2])
+        item, units, unit_price = (
+            self.item_name(rest[0]),
+            int(rest[1]),
+            cents(float(rest[2])),
+        )
         if not 1 <= units <= MAX_UNITS:
             return f"每次数量要在 1–{MAX_UNITS} 之间。"
         market = self.price(self.products[item], now) * self.impact(key, item, now)
-        low = math.ceil(market * TRADE_BAND[0])
-        high = math.floor(market * TRADE_BAND[1])
+        low = math.ceil(market * TRADE_BAND[0] * 100 - 1e-9) / 100
+        high = math.floor(market * TRADE_BAND[1] * 100 + 1e-9) / 100
         if not low <= unit_price <= high:
-            return f"单价要在现价的 50%–200% 之间，也就是 {low}–{high}。"
+            return f"单价要在现价的 50%–200% 之间，也就是 {money(low)}–{money(high)}。"
         with self.store.transaction():
             self._rot(bot, seller, now)
             held = sum(lot["quantity"] for lot in self._stock(bot, seller, item=item))
@@ -1199,8 +1220,8 @@ class KabuMarket:
             ident = cur.lastrowid
         buyer = self._name(key, targets[0])
         return (
-            f"报价 #{ident}：卖给 @{buyer} {units} 个{item}，单价 {unit_price}，"
-            f"共 {units * unit_price} 金币（手续费 5% 由卖方出）。"
+            f"报价 #{ident}：卖给 @{buyer} {units} 个{item}，单价 {money(unit_price)}，"
+            f"共 {money(units * unit_price)} 金币（手续费 5% 由卖方出）。"
             f"对方发 /kabu ok {ident}，30 分钟内有效。"
         )
 
@@ -1220,20 +1241,20 @@ class KabuMarket:
                 return "没有这个报价，或者已经过期。"
             if offer["buyer"] != buyer:
                 return "这个报价不是给你的。"
-            total = offer["quantity"] * offer["unit_price"]
+            total = cents(offer["quantity"] * offer["unit_price"])
             acct = self.account(bot, buyer, now)
             if acct["coins"] < total:
-                return f"金币不够：要 {total}，你只有 {acct['coins']}。"
+                return f"金币不够：要 {money(total)}，你只有 {money(acct['coins'])}。"
             acct["coins"] -= total
             self.save(acct)
             seller = self.account(bot, offer["seller"], now)
-            seller["coins"] += math.floor(total * (1 - TRADE_FEE))
+            seller["coins"] += cents(total * (1 - TRADE_FEE))
             self.save(seller)
             self._put(bot, buyer, key, offer["item"], json.loads(offer["lots"]))
             self.store.db.execute("DELETE FROM kabu_offers WHERE id=?", (offer["id"],))
         return (
-            f"成交：你花 {total} 金币买到 {offer['quantity']} 个{offer['item']}"
-            f"（大头菜的保质期跟着货走），剩 {acct['coins']} 金币。"
+            f"成交：你花 {money(total)} 金币买到 {offer['quantity']} 个{offer['item']}"
+            f"（大头菜的保质期跟着货走），剩 {money(acct['coins'])} 金币。"
         )
 
     def withdraw(self, event, args, now):
@@ -1256,10 +1277,11 @@ class KabuMarket:
             ).fetchall()
             for player in players:
                 acct = self.account(bot, player["user_id"], now)
-                worth = math.floor(self.net_worth(acct, now))
+                worth = cents(self.net_worth(acct, now))
                 rows.append((worth, player["name"] or "某位群友"))
         rows.sort(reverse=True)
         lines = [
-            f"{i}. {name}：{worth}" for i, (worth, name) in enumerate(rows[:10], 1)
+            f"{i}. {name}：{money(worth)}"
+            for i, (worth, name) in enumerate(rows[:10], 1)
         ]
         return "本群净资产排行（所有群合计，已扣欠款）：\n" + "\n".join(lines)

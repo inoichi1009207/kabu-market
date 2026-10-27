@@ -133,10 +133,10 @@ def test_turnips_trade_every_day_and_rot_after_14_days(market, clock):
 
 def test_first_kabu_ever_grants_starter_coins_once(market, clock):
     text = market.respond(ev(clock, "/kabu", sender="new"))
-    assert f"送你 {K.STARTER_COINS} 金币" in text
+    assert f"送你 {K.STARTER_COINS:.2f} 金币" in text
     assert acct(market, "new")["coins"] == K.STARTER_COINS
     other = market.respond(ev(clock, "/kabu 仓库", sender="new", peer=OTHER))
-    assert "送你" not in other and f"金币 {K.STARTER_COINS}" in other
+    assert "送你" not in other and f"金币 {K.STARTER_COINS:.2f}" in other
 
 
 def test_clear_out_sells_everything_here(market, clock):
@@ -254,7 +254,7 @@ def test_borrow_limit_interest_and_repay(market, clock):
     assert "借到 3000" in market.respond(ev(clock, "/kabu 借 3000"))
     assert "最多再借 0" in market.respond(ev(clock, "/kabu 借 1"))
     clock.advance(2 * K.DAY)
-    assert acct(market)["debt"] == math.ceil(3000 * 1.01**2)
+    assert acct(market)["debt"] == pytest.approx(K.cents(3000 * 1.01**2))  # to the cent
     market.respond(ev(clock, "/kabu 还 全部"))
     assert acct(market)["debt"] == 0
 
@@ -342,7 +342,9 @@ def test_offer_escrows_goods_and_accept_moves_coins_with_fee(market, clock):
     assert "成交" in market.respond(ev(clock, "/kabu 接受 1", sender="u2"))
     assert held(market, "西红柿", "u2") == 4
     assert acct(market, "u2")["coins"] == 10_000 - 4 * unit
-    assert acct(market, "u1")["coins"] - seller_before == math.floor(4 * unit * 0.95)
+    assert acct(market, "u1")["coins"] - seller_before == pytest.approx(
+        K.cents(4 * unit * 0.95)
+    )
 
 
 def test_offer_band_self_trade_withdraw_and_expiry(market, clock):
@@ -481,7 +483,7 @@ def test_short_ascii_commands_and_item_codes(market, clock):
 
 def test_bare_kabu_is_a_short_card_not_the_full_rules(market, clock):
     text = market.respond(ev(clock, "/kabu", sender="newbie"))
-    assert "送你 100 金币" in text and "你有 100 金币" in text
+    assert "送你 100.00 金币" in text and "你有 100.00 金币" in text
     assert "大头菜(d)" in text and "/kabu help" in text
     assert len(text.splitlines()) <= 4  # welcome + three-line card
     assert "强制平仓" not in text  # the full rules live in /kabu help
@@ -566,12 +568,10 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
         "这期天气一般",
         "这期天气差",
     ]
-    assert acct(market, "u1")["coins"] == 1000 - 40 * K.SEED_COST + math.floor(
-        40 * mine["u1"] + 0.5
-    )
-    assert acct(market, "u2")["coins"] == 1000 - 24 * K.SEED_COST + math.floor(
-        24 * mine["u2"] + 0.5
-    )
+    for user, seeds in (("u1", 40), ("u2", 24)):
+        assert acct(market, user)["coins"] == pytest.approx(
+            1000 - seeds * K.SEED_COST + K.cents(seeds * mine[user])
+        )
     assert "上期本群共种 64 个" in market.respond(ev(clock, "/kabu market"))
     assert "收获了" not in market.respond(
         ev(clock, "/kabu bag", sender="u1")
@@ -669,7 +669,7 @@ def test_harvest_rounds_payouts_so_small_stakes_can_win(market, clock):
     price, weather = market.harvest_price(key, period, 6, market.harvest_demand(2))
     mine = market.plot_price(key, period, "u1", price, weather)
     market.respond(ev(clock, "/kabu bag", sender="u1"))
-    assert acct(market, "u1")["coins"] == 1000 - 6 + math.floor(3 * mine + 0.5)
+    assert acct(market, "u1")["coins"] == pytest.approx(1000 - 6 + K.cents(3 * mine))
 
 
 def test_turnips_are_never_sold_below_this_weeks_sunday_price(market, clock):
@@ -687,7 +687,7 @@ def test_turnips_are_never_sold_below_this_weeks_sunday_price(market, clock):
     assert market.ask(turnip, clock.now()) == pytest.approx(sunday)
     give(market, 10_000)
     market.respond(ev(clock, "/kabu buy d 1"))
-    assert acct(market)["coins"] == 10_000 - math.ceil(sunday - 1e-9)
+    assert acct(market)["coins"] == pytest.approx(10_000 - K.cents(sunday))
     assert "买入要" in market.respond(ev(clock, "/kabu market"))
     assert "（买 " in market.respond(ev(clock, "/kabu"))
     # tomatoes, and turnips at or above the Sunday price, cost the shown price
@@ -695,3 +695,20 @@ def test_turnips_are_never_sold_below_this_weeks_sunday_price(market, clock):
     assert market.ask(tomato, clock.now()) == market.price(tomato, clock.now())
     go(clock, 6, 9)  # Sunday: the buy price is today's price
     assert market.ask(turnip, clock.now()) == market.price(turnip, clock.now())
+
+
+def test_coins_are_kept_and_shown_to_the_cent(market, clock):
+    go(clock, 0)
+    give(market, 100)
+    turnip = market.products["大头菜"]
+    cost, _ = KabuMarket.buy_cost(market.ask(turnip, clock.now()), 1.0, 2)
+    assert cost == K.cents(cost) and cost != int(cost)  # not rounded to a whole coin
+    text = market.respond(ev(clock, "/kabu buy d 2"))
+    assert f"花 {cost:.2f} 金币" in text and f"剩 {100 - cost:.2f} 金币" in text
+    assert acct(market)["coins"] == pytest.approx(100 - cost)
+    market.respond(ev(clock, "/kabu loan 50.5"))
+    assert acct(market)["debt"] == pytest.approx(50.5)
+    assert "还款 12.25 金币" in market.respond(ev(clock, "/kabu repay 12.25"))
+    assert acct(market)["debt"] == pytest.approx(38.25)
+    assert "用法" in market.respond(ev(clock, "/kabu repay 1.234"))  # cents at most
+    assert K.money(31) == "31.00" and K.fmt(123.4) == "123.40"
