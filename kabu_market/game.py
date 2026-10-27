@@ -82,7 +82,8 @@ PRODUCTS = (
         "大头菜",
         20.0,
         "turnip",
-        "每周走势不同（这周冲高还是一路跌要自己看）；每天都能买卖，但买入价不低于本周日的价；买入 14 天后烂掉",
+        "价格一直连续地走，每周暗中定一种走势（波动、大冲高、一路跌、小冲高），这周是哪种要自己看；"
+        "每天都能买卖，买入 14 天后烂掉",
     ),
     Product(
         "西红柿",
@@ -192,11 +193,6 @@ def weather_word(weather):
     return "这期天气一般"
 
 
-def fmt_quote(sell, buy):
-    """One number when buying and selling cost the same, else 'sell（买 buy）'."""
-    return fmt(sell) if fmt(buy) == fmt(sell) else f"{fmt(sell)}（买 {fmt(buy)}）"
-
-
 def time_left(seconds):
     if seconds >= DAY:
         return f"{int(seconds // DAY)} 天后"
@@ -269,24 +265,9 @@ class KabuMarket:
         day, half = slot_of(now)
         return getattr(self.engine, product.kind)(product.base, day, half)
 
-    def ask(self, product, now):
-        """System price when the system sells to a player, before impact.
-
-        Turnips are never sold below this week's Sunday price (as with the Sunday seller
-        in the original game), while selling to the system follows the weekly pattern.
-        Without this floor a cheap Saturday followed by the Sunday reset was a near-sure
-        overnight profit (an audit saw 9576 such trades and not one loss).
-        """
-        price = self.price(product, now)
-        if product.kind != "turnip":
-            return price
-        day, _half = slot_of(now)
-        return max(price, self.engine.turnip(product.base, week_start(day), 0))
-
     def quote(self, product, scope_key, now):
-        """What a player sees: (sell-to-system price, buy price) with this group's impact."""
-        impact = self.impact(scope_key, product.name, now)
-        return self.price(product, now) * impact, self.ask(product, now) * impact
+        """This group's price: the system price with this group's impact."""
+        return self.price(product, now) * self.impact(scope_key, product.name, now)
 
     def impact(self, scope_key, item, now):
         row = self.store.db.execute(
@@ -356,10 +337,7 @@ class KabuMarket:
         """
         now = self.clock.now()
         key = event.scope.key
-        prices = {}
-        for p in PRODUCTS:
-            sell, buy = self.quote(p, key, now)
-            prices[p.name] = {"sell_to_system": round(sell, 2), "buy": round(buy, 2)}
+        prices = {p.name: round(self.quote(p, key, now), 2) for p in PRODUCTS}
         day = self.day(now)
         news = [
             f"{label}：{headline}"
@@ -980,8 +958,7 @@ class KabuMarket:
         with self.store.transaction():
             coins = self.account(event.scope.bot_id, event.sender, now)["coins"]
         prices = "　".join(
-            f"{p.name}({code_of(p.name)}) "
-            + fmt_quote(*self.quote(p, event.scope.key, now))
+            f"{p.name}({code_of(p.name)}) " + fmt(self.quote(p, event.scope.key, now))
             for p in PRODUCTS
         )
         prices += f"　{POTATO}(m) 种薯 {money(SEED_COST)}"
@@ -995,11 +972,10 @@ class KabuMarket:
         _day, half = slot_of(now)
         lines = []
         for product in PRODUCTS:
-            sell, buy = self.quote(product, event.scope.key, now)
-            line = f"{product.name}（{code_of(product.name)}）：{fmt(sell)} 金币/个"
-            if fmt(buy) != fmt(sell):
-                line += f"，买入要 {fmt(buy)}（不低于本周日价）"
-            lines.append(line)
+            quote = self.quote(product, event.scope.key, now)
+            lines.append(
+                f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个"
+            )
         public = self.potato_public(event.scope.key, now)
         potato = (
             f"{POTATO}（m）：种薯 {money(SEED_COST)} 金币/个，{public['next_harvest']}收获；"
@@ -1059,16 +1035,27 @@ class KabuMarket:
 
     def buy(self, event, item, units, now):
         product = self.products[item]
-        price = self.ask(product, now)
+        price = self.price(product, now)
         bot, user, key = event.scope.bot_id, event.sender, event.scope.key
         with self.store.transaction():
             acct = self.account(bot, user, now)
             impact = self.impact(key, item, now)
-            if units is None:  # “全部”: as many as the coins allow
+            worth = self.net_worth(acct, now)
+
+            def safe(n):
+                """A buy pays the impact-curve price but is valued at the system price,
+                so a big leveraged buy could fall under the margin line by itself."""
+                if not acct["debt"]:
+                    return True
+                after_worth = worth - self.buy_cost(price, impact, n)[0] + n * price
+                return after_worth >= MARGIN * acct["debt"]
+
+            if units is None:  # “全部”: as many as the coins (and the margin) allow
                 units = 0
                 while (
                     units < MAX_UNITS
                     and self.buy_cost(price, impact, units + 1)[0] <= acct["coins"]
+                    and safe(units + 1)
                 ):
                     units += 1
                 if units == 0:
@@ -1076,6 +1063,14 @@ class KabuMarket:
             cost, after = self.buy_cost(price, impact, units)
             if cost > acct["coins"]:
                 return f"金币不够：买 {units} 个{item}要 {money(cost)} 金币，你只有 {money(acct['coins'])} 金币。"
+            if not safe(units):
+                room = 0
+                while room < units and safe(room + 1):
+                    room += 1
+                return (
+                    f"买 {units} 个{item}之后，你的净资产会跌到欠款的 {MARGIN:.0%} 以下，"
+                    f"马上就会被强制平仓。现在最多能买 {room} 个。"
+                )
             acct["coins"] -= cost
             self.save(acct)
             self._set_impact(key, item, after, now)
@@ -1241,6 +1236,28 @@ class KabuMarket:
                 return "没有这个报价，或者已经过期。"
             if offer["buyer"] != buyer:
                 return "这个报价不是给你的。"
+            # The band is checked again here: otherwise an offer made before a price move
+            # is a free option for the buyer (take it if the price rose, ignore it if not).
+            market = self.quote(self.products[offer["item"]], offer["scope_key"], now)
+            if (
+                not market * TRADE_BAND[0]
+                <= offer["unit_price"]
+                <= market * TRADE_BAND[1]
+            ):
+                self._put(
+                    bot,
+                    offer["seller"],
+                    offer["scope_key"],
+                    offer["item"],
+                    json.loads(offer["lots"]),
+                )
+                self.store.db.execute(
+                    "DELETE FROM kabu_offers WHERE id=?", (offer["id"],)
+                )
+                return (
+                    f"价格已经变了：单价 {money(offer['unit_price'])} 不在现价 {fmt(market)} 的 "
+                    "50%–200% 之间，这个报价作废，货退回给卖家。"
+                )
             total = cents(offer["quantity"] * offer["unit_price"])
             acct = self.account(bot, buyer, now)
             if acct["coins"] < total:

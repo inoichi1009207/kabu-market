@@ -4,7 +4,8 @@ Usage: python tools/simulate_potato.py [K per_player]   (defaults are the shippe
 
 group price per potato = SEED_COST * K * D / (D + total planted),  D = per_player x players
 each planter's price   = group price * clamp(weather * own plot luck, 0.5, 1.8)
-Payouts are rounded; everyone has a wallet (100 to start, check-ins in between).
+Payouts are kept to the cent like the game's; everyone has a wallet (100 to start,
+check-ins in between).
 Besides the mean per period, it reports how often each player wins and how often a
 period has both winners and losers: the game should be fun, not only balanced.
 """
@@ -32,7 +33,7 @@ def best_response(others, others_planters, depth, budget):
     if others_planters < 1 or others < 1:  # nobody else lately: expect someone small
         others = 5
     best, best_n = 0.0, 0
-    for n in range(1, min(CAP, budget // COST) + 1):
+    for n in range(1, min(CAP, int(budget // COST)) + 1):
         ev = n * COST * K * depth / (depth + others + n) - n * COST
         if ev > best:
             best, best_n = ev, n
@@ -70,7 +71,7 @@ def run(mix, seed):
                 "sixty": lambda: 60,
                 "random": lambda: rng.randint(1, CAP) if rng.random() < 0.6 else 0,
             }[kind]()
-            plants.append(max(0, min(amount, CAP, coins[i] // COST)))
+            plants.append(max(0, min(amount, CAP, int(coins[i] // COST))))
         total = sum(plants)
         planters = sum(1 for v in plants if v)
         group_price = COST * K * depth / (depth + total)
@@ -84,7 +85,7 @@ def run(mix, seed):
             else:
                 luck = math.exp(wrng.gauss(-0.02, 0.2))
                 price = group_price * max(0.5, min(1.8, weather * luck))
-                g = math.floor(seeds * price + 0.5) - seeds * COST
+                g = game.cents(seeds * price) - seeds * COST  # paid to the cent, as the game does
                 signs.add(g > 0)
             gain[i] += g
             coins[i] += g

@@ -2,13 +2,14 @@
 
 import math
 import random
+import statistics
 from datetime import datetime
 
 import pytest
 
 from kabu_market import game as K
 from kabu_market import Event, KabuMarket, Scope
-from kabu_market.prices import PATTERN_NAMES, TZ, PriceEngine, slot_of, week_start
+from kabu_market.prices import TURNIP_BOUND, TZ, PriceEngine, slot_of, week_start
 
 GROUP, OTHER = "30005", "30006"
 
@@ -228,20 +229,28 @@ def test_prices_are_two_a_day_deterministic_and_survive_restart(market, store, c
     assert market.price(tomato, clock.now()) != morning
 
 
-def test_turnip_week_shapes_and_markov_patterns():
+def test_turnip_walks_on_across_weeks_and_patterns_still_show():
     engine = PriceEngine("t", 740000)
-    seen = set()
+    start = week_start(740000)
+    seen, jumps, weekly = set(), [], {}
     for week in range(200):
-        sunday = week_start(740000) + 7 * week
+        sunday = start + 7 * week
         pattern = engine.pattern(sunday)
         seen.add(pattern)
-        buy, seq = engine.turnip_week(sunday)
-        assert 0.9 <= buy <= 1.1 and len(seq) == 12 and min(seq) >= 0.2
-        if pattern == 1:
-            assert max(seq) >= 2.0
-        if pattern == 2:
-            assert all(b < a for a, b in zip(seq, seq[1:]))
+        assert len(engine.turnip_drift(sunday)) == 14
+        sat, sun = engine.turnip(20, sunday + 6, 1), engine.turnip(20, sunday + 7, 0)
+        jumps.append(sun / sat)
+        weekly.setdefault(pattern, []).append(sat / engine.turnip(20, sunday, 0))
     assert seen == {0, 1, 2, 3}
+    # no Sunday reset: Saturday -> Sunday has no direction worth trading
+    assert 0.97 < statistics.mean(jumps) < 1.03
+    assert 0.3 < sum(j > 1 for j in jumps) / len(jumps) < 0.7
+    # a falling week still falls
+    assert statistics.mean(weekly[2]) < 0.8 < statistics.mean(weekly[0])
+    prices = [engine.turnip(20, start + d, h) for d in range(1400) for h in (0, 1)]
+    bound = 20 * math.exp(TURNIP_BOUND)
+    assert min(prices) >= 20 / math.exp(TURNIP_BOUND) and max(prices) <= bound
+    assert 12 < statistics.median(prices) < 30
     patterns = [engine.pattern(week_start(740000) + 7 * w) for w in range(200)]
     repeats = sum(a == b == 1 for a, b in zip(patterns, patterns[1:]))
     assert repeats < 10  # a large spike rarely follows a large spike
@@ -672,36 +681,24 @@ def test_harvest_rounds_payouts_so_small_stakes_can_win(market, clock):
     assert acct(market, "u1")["coins"] == pytest.approx(1000 - 6 + K.cents(3 * mine))
 
 
-def test_turnips_are_never_sold_below_this_weeks_sunday_price(market, clock):
+def test_turnips_cost_the_shown_price_any_day(market, clock):
     turnip = market.products["大头菜"]
-    go(clock, 5, 9)  # a Saturday (Mon=0)
-    for _ in range(30):  # find a Saturday whose price sits below its Sunday price
-        sunday = market.engine.turnip(
-            turnip.base, week_start(market.day(clock.now())), 0
-        )
-        if market.price(turnip, clock.now()) < sunday * 0.95:
-            break
-        clock.advance(7 * K.DAY)
-    else:
-        pytest.fail("no cheap Saturday in 30 weeks")
-    assert market.ask(turnip, clock.now()) == pytest.approx(sunday)
     give(market, 10_000)
-    market.respond(ev(clock, "/kabu buy d 1"))
-    assert acct(market)["coins"] == pytest.approx(10_000 - K.cents(sunday))
-    assert "买入要" in market.respond(ev(clock, "/kabu market"))
-    assert "（买 " in market.respond(ev(clock, "/kabu"))
-    # tomatoes, and turnips at or above the Sunday price, cost the shown price
-    tomato = market.products["西红柿"]
-    assert market.ask(tomato, clock.now()) == market.price(tomato, clock.now())
-    go(clock, 6, 9)  # Sunday: the buy price is today's price
-    assert market.ask(turnip, clock.now()) == market.price(turnip, clock.now())
+    key = Scope("bot", "group", GROUP).key
+    for weekday in (5, 6, 0):  # Saturday, Sunday, Monday: no special day any more
+        go(clock, weekday, 9)
+        price = market.quote(turnip, key, clock.now())  # what /kabu market shows
+        before = acct(market)["coins"]
+        market.respond(ev(clock, "/kabu buy d 1"))
+        assert before - acct(market)["coins"] == pytest.approx(K.cents(price))
+    assert "买入要" not in market.respond(ev(clock, "/kabu market"))
 
 
 def test_coins_are_kept_and_shown_to_the_cent(market, clock):
     go(clock, 0)
     give(market, 100)
     turnip = market.products["大头菜"]
-    cost, _ = KabuMarket.buy_cost(market.ask(turnip, clock.now()), 1.0, 2)
+    cost, _ = KabuMarket.buy_cost(market.price(turnip, clock.now()), 1.0, 2)
     assert cost == K.cents(cost) and cost != int(cost)  # not rounded to a whole coin
     text = market.respond(ev(clock, "/kabu buy d 2"))
     assert f"花 {cost:.2f} 金币" in text and f"剩 {100 - cost:.2f} 金币" in text
@@ -712,3 +709,43 @@ def test_coins_are_kept_and_shown_to_the_cent(market, clock):
     assert acct(market)["debt"] == pytest.approx(38.25)
     assert "用法" in market.respond(ev(clock, "/kabu repay 1.234"))  # cents at most
     assert K.money(31) == "31.00" and K.fmt(123.4) == "123.40"
+
+
+def test_a_leveraged_buy_cannot_push_you_under_the_margin_line_by_itself(market, clock):
+    go(clock, 0)
+    give(market, 1000)
+    market.respond(ev(clock, "/kabu loan all"))
+    assert acct(market)["debt"] == pytest.approx(3000)
+    key = Scope("bot", "group", GROUP).key
+    price = market.price(market.products["大头菜"], clock.now())
+    impact = market.impact(key, "大头菜", clock.now())
+    affordable = 0
+    while KabuMarket.buy_cost(price, impact, affordable + 1)[0] <= 4000:
+        affordable += 1
+    text = market.respond(ev(clock, f"/kabu buy d {affordable}"))
+    assert "马上就会被强制平仓" in text and "现在最多能买" in text
+    market.respond(ev(clock, "/kabu buy d all"))
+    a = acct(market)
+    assert held(market, "大头菜") > 0
+    assert market.net_worth(a, clock.now()) >= K.MARGIN * a["debt"]
+    market.respond(ev(clock, "/kabu market", sender="u2"))  # runs the margin check
+    assert "强制平仓" not in market.respond(ev(clock, "/kabu bag"))
+
+
+def test_an_offer_out_of_band_by_the_time_it_is_accepted_is_void(market, clock):
+    go(clock, 1, 9)
+    give(market, 10_000, "u1")
+    give(market, 10_000, "u2")
+    market.respond(ev(clock, "/kabu buy x 3", sender="u1"))
+    market.respond(ev(clock, "/kabu", sender="u2", name="阿二"))
+    key = Scope("bot", "group", GROUP).key
+    tomato = market.products["西红柿"]
+    price = market.quote(tomato, key, clock.now())
+    unit = K.cents(price * 1.9)  # inside the band now
+    market.respond(ev(clock, f"/kabu offer x 3 {unit}", sender="u1", mentions=["u2"]))
+    with market.store.transaction():  # the market slumps before the buyer answers
+        market._set_impact(key, "西红柿", 0.5, clock.now())
+    text = market.respond(ev(clock, "/kabu ok 1", sender="u2"))
+    assert "报价作废" in text
+    assert held(market, "西红柿", "u1") == 3 and held(market, "西红柿", "u2") == 0
+    assert acct(market, "u2")["coins"] == 10_000
