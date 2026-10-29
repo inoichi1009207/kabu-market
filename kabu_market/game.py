@@ -205,7 +205,8 @@ def code_of(name):
     return next(code for code, item in ITEM_CODES.items() if item == name)
 
 
-def help_text():
+def rules_text():
+    """Every rule in one text: what the chat model is given, not what players see."""
     goods = "\n".join(f"· {p.name}（{code_of(p.name)}）：{p.trait}" for p in PRODUCTS)
     goods += f"\n· {POTATO}（m）：{POTATO_TRAIT}"
     return (
@@ -220,6 +221,91 @@ def help_text():
         "每天上午、下午各一个价；在本群买得越多价格越高，卖得越多价格越低，波动会慢慢回落。货物跟着你走，在哪个群都能卖。\n"
         "商品：\n" + goods
     )
+
+
+HELP = (
+    "大头菜市场 · 命令前都加 /kabu\n"
+    "sign 签到（每天 {lo}–{hi} 金币）\n"
+    "market 看价　bag 仓库　rank 排行\n"
+    "buy d 5　sell d 5（数量可写 all）\n"
+    "d 大头菜　x 西红柿　dump 清仓\n"
+    "plant 10 种土豆（3 天一收）\n"
+    "loan 500　repay 500 借钱还钱\n"
+    "offer @群友 d 5 25 卖给群友\n"
+    "钱包全群通用，新人送 {starter}\n"
+    "细则：/kabu help 菜｜土豆｜借钱｜交易"
+)
+HELP_TOPICS = {
+    "菜": (
+        "大头菜 d\n"
+        "· 价格一直在走，每周暗中定一种走势：波动、冲高或一路跌\n"
+        "· 买入 {shelf} 天后烂掉\n"
+        "西红柿 x\n"
+        "· 跟着新闻走，新闻在 market 里看\n"
+        "· 涨多少、哪天兑现、会不会反着走都说不准；不会坏\n"
+        "两种都是\n"
+        "· 本群买得越多越贵，卖得越多越便宜，几小时后回落\n"
+        "· 每天上午、下午各一个价；货跟着人走，哪个群都能卖"
+    ),
+    "土豆": (
+        "种土豆 m\n"
+        "· plant 10：种薯 {seed} 一个，每人每期最多 {cap} 个，只能在群里种\n"
+        "· 每 3 天晚上 8 点收获\n"
+        "· 全群种得越多越便宜；这期玩的人越多越贵\n"
+        "· 各家地里收成不同，同一期有人赚有人亏\n"
+        "· 停止播种的时间每期随机，在收获前 2 小时内\n"
+        "· 只有一个人种就全额退款"
+    ),
+    "借钱": (
+        "借钱\n"
+        "· loan 500 借，repay 500 还（都可写 all）\n"
+        "· 欠款最多到净资产的 3 倍（4 倍杠杆），日息 1%\n"
+        "· 净资产跌到欠款的 {margin} 以下会被强制平仓\n"
+        "· 平仓后还欠的，每次签到自动拿一半还"
+    ),
+    "交易": (
+        "卖给群友\n"
+        "· offer @群友 d 5 25：卖 5 个大头菜，单价 25\n"
+        "· 对方发 ok 编号 成交，你发 cancel 编号 撤回\n"
+        "· 单价要在现价的 50%–200%，30 分钟内有效\n"
+        "· 卖方付 5% 手续费"
+    ),
+}
+HELP_ALIASES = {
+    "大头菜": "菜",
+    "西红柿": "菜",
+    "商品": "菜",
+    "d": "菜",
+    "x": "菜",
+    "马铃薯": "土豆",
+    "m": "土豆",
+    "plant": "土豆",
+    "种": "土豆",
+    "loan": "借钱",
+    "repay": "借钱",
+    "贷款": "借钱",
+    "杠杆": "借钱",
+    "平仓": "借钱",
+    "offer": "交易",
+    "群友": "交易",
+    "报价": "交易",
+    "ok": "交易",
+}
+
+
+def help_text(topic=None):
+    """Phone-sized help: the command list, or one topic page."""
+    values = dict(
+        lo=CHECKIN_RANGE[0],
+        hi=CHECKIN_RANGE[1],
+        starter=money(STARTER_COINS),
+        shelf=TURNIP_SHELF_DAYS,
+        seed=money(SEED_COST),
+        cap=PLANT_CAP,
+        margin=f"{MARGIN:.0%}",
+    )
+    key = HELP_ALIASES.get((topic or "").lower(), topic)
+    return (HELP_TOPICS.get(key) or HELP).format(**values)
 
 
 class KabuMarket:
@@ -358,7 +444,7 @@ class KabuMarket:
                 "Nobody, including you, knows how many potatoes this chat planted this period "
                 "until the harvest: never guess or hint at it."
             ),
-            "rules": help_text(),
+            "rules": rules_text(),
             "prices_now_in_this_chat": prices,
             "tomato_news": news,
             "potato": self.potato_public(key, now),
@@ -683,11 +769,11 @@ class KabuMarket:
                     )
                     self._notify(
                         acct,
-                        f"土豆收获了：本群这期一共种了 {total} 个（{len(plants)} 人），"
-                        f"{weather_word(weather)}；各家地里收成不同，"
-                        f"每个卖价最高 {fmt(best)}、最低 {fmt(worst)}。"
-                        f"你种了 {plant['seeds']} 个，每个卖 {fmt(mine)}，"
-                        f"收入 {money(income)} 金币，{verdict}。",
+                        f"土豆收获了！本群这期种了 {total} 个（{len(plants)} 人），"
+                        f"{weather_word(weather)}\n"
+                        f"各家每个卖 {fmt(worst)}–{fmt(best)}\n"
+                        f"你种 {plant['seeds']} 个，每个卖 {fmt(mine)}，"
+                        f"收入 {money(income)}，{verdict}",
                     )
                 self.save(acct)
             self.store.db.execute(
@@ -764,10 +850,7 @@ class KabuMarket:
             )
         # The reply never repeats the amount: the plant command itself is the only leak,
         # and the player decides whether to recall it.
-        return (
-            "种好了。想让别人不知道你种了多少，可以撤回刚才那条消息。"
-            f"{self.harvest_label(period)}收获；停止播种的时间每期随机，在收获前 2 小时内。"
-        )
+        return f"种好了，{self.harvest_label(period)}收获。\n想保密就撤回刚才那条消息。"
 
     # -- commands -----------------------------------------------------------------
 
@@ -816,7 +899,7 @@ class KabuMarket:
         if sub == "card":
             text = self.card(event, now)
         elif sub in {"help", "h", "帮助", "玩法"}:
-            text = help_text()
+            text = help_text(args[1] if len(args) > 1 else None)
         elif sub in handlers:
             text = handlers[sub](event, args[1:], now)
         elif sub in BUY_WORDS | SELL_WORDS:
@@ -977,14 +1060,15 @@ class KabuMarket:
                 f"{product.name}（{code_of(product.name)}）：{fmt(quote)} 金币/个"
             )
         public = self.potato_public(event.scope.key, now)
-        potato = (
-            f"{POTATO}（m）：种薯 {money(SEED_COST)} 金币/个，{public['next_harvest']}收获；"
-            f"这期已有 {public['players_this_period']} 人在本群玩，玩的人越多土豆卖得越贵"
+        lines.append(
+            f"{POTATO}（m）：种薯 {money(SEED_COST)}，{public['next_harvest']}收获"
         )
+        lines.append(f"　这期本群 {public['players_this_period']} 人在玩，人越多越贵")
         last = public.get("last_harvest")
         if last:
-            potato += f"；上期本群共种 {last['total_planted']} 个，平均每个卖 {fmt(last['price_each'])}"
-        lines.append(potato)
+            lines.append(
+                f"　上期种了 {last['total_planted']} 个，平均每个卖 {fmt(last['price_each'])}"
+            )
         day = self.day(now)
         for when_day, label in ((day, "今天"), (day - 1, "昨天")):
             headline = self.engine.headline(when_day)
@@ -994,7 +1078,7 @@ class KabuMarket:
         return (
             f"本群{when}的市场价格：\n"
             + "\n".join(lines)
-            + "\n在本群买得越多价格越高，卖得越多价格越低。发 /kabu help 看各商品的脾气。"
+            + "\n买得越多越贵，卖得越多越便宜。细则：/kabu help 菜"
         )
 
     def inventory(self, event, _args, now):
@@ -1135,8 +1219,8 @@ class KabuMarket:
             acct["debt_day"] = self.day(now)
             self.save(acct)
         return (
-            f"借到 {money(amount)} 金币，现在欠款 {money(acct['debt'])}，日息 1%。"
-            f"还能接着借，直到欠款合计到净资产的 3 倍；净资产跌到欠款的 {MARGIN:.0%} 以下会被强制平仓。"
+            f"借到 {money(amount)} 金币，现在欠款 {money(acct['debt'])}，日息 1%。\n"
+            f"净资产跌到欠款的 {MARGIN:.0%} 以下会被强制平仓。"
         )
 
     def repay(self, event, args, now):

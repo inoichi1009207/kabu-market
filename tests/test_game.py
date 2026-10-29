@@ -272,7 +272,7 @@ def test_several_loans_until_debt_equals_net_assets(market, clock):
     go(clock, 0)
     give(market, 600)
     for _ in range(3):
-        assert "还能接着借" in market.respond(ev(clock, "/kabu 借 600"))
+        assert "借到 600.00 金币" in market.respond(ev(clock, "/kabu 借 600"))
     assert acct(market)["debt"] == 1800
     assert "最多再借 0" in market.respond(ev(clock, "/kabu 借 1"))
     assert "净资产 600" in market.respond(ev(clock, "/kabu 仓库"))
@@ -486,7 +486,8 @@ def test_short_ascii_commands_and_item_codes(market, clock):
     assert "本群净资产排行" in market.respond(ev(clock, "/kabu rank"))
     assert "卖出" in market.respond(ev(clock, "/kabu dump"))
     help_text = market.respond(ev(clock, "/kabu help"))
-    assert "/kabu sign" in help_text and "/kabu buy d 5" in help_text
+    assert "命令前都加 /kabu" in help_text
+    assert "sign 签到" in help_text and "buy d 5" in help_text
     assert "大头菜（d）" in market.respond(ev(clock, "/kabu market"))
 
 
@@ -569,8 +570,8 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
         assert price * 0.5 <= mine[u] <= price * 1.8
     assert mine["u1"] != mine["u2"]  # each plot grows differently
     text = market.respond(ev(clock, "/kabu bag", sender="u1"))
-    assert "土豆收获了：本群这期一共种了 64 个（2 人）" in text
-    assert f"最高 {K.fmt(max(mine.values()))}、最低 {K.fmt(min(mine.values()))}" in text
+    assert "土豆收获了！本群这期种了 64 个（2 人）" in text
+    assert f"各家每个卖 {K.fmt(min(mine.values()))}–{K.fmt(max(mine.values()))}" in text
     assert K.weather_word(weather) in text and "系数" not in text  # no formula detail
     assert [K.weather_word(w) for w in (1.3, 1.0, 0.7)] == [
         "这期天气好",
@@ -581,7 +582,7 @@ def test_harvest_prices_by_total_planted_and_tells_each_planter(market, clock):
         assert acct(market, user)["coins"] == pytest.approx(
             1000 - seeds * K.SEED_COST + K.cents(seeds * mine[user])
         )
-    assert "上期本群共种 64 个" in market.respond(ev(clock, "/kabu market"))
+    assert "上期种了 64 个" in market.respond(ev(clock, "/kabu market"))
     assert "收获了" not in market.respond(
         ev(clock, "/kabu bag", sender="u1")
     )  # told once
@@ -658,7 +659,7 @@ def test_demand_counts_players_of_this_period_not_seeds_planted(market, clock):
     for seeds, user in ((20, "u1"), (5, "u2")):
         market.respond(ev(clock, f"/kabu plant {seeds}", sender=user))
     assert market.active_players(key, period) == 3
-    assert "这期已有 3 人在本群玩，玩的人越多土豆卖得越贵" in market.respond(
+    assert "这期本群 3 人在玩，人越多越贵" in market.respond(
         ev(clock, "/kabu market", sender="u3")
     )
     # splitting one stake over more planters adds no demand by itself
@@ -749,3 +750,27 @@ def test_an_offer_out_of_band_by_the_time_it_is_accepted_is_void(market, clock):
     assert "报价作废" in text
     assert held(market, "西红柿", "u1") == 3 and held(market, "西红柿", "u2") == 0
     assert acct(market, "u2")["coins"] == 10_000
+
+
+def test_help_fits_a_phone_screen_and_has_topic_pages(market, clock):
+    go(clock, 0)
+    short = K.help_text()
+    assert len(short.splitlines()) <= 10
+    assert max(len(line) for line in short.splitlines()) <= 26  # a phone line or two
+    for topic, word in (
+        ("菜", "西红柿 x"),
+        ("土豆", "种土豆"),
+        ("借钱", "强制平仓"),
+        ("交易", "手续费"),
+    ):
+        page = market.respond(ev(clock, f"/kabu help {topic}"))
+        assert word in page and "命令前都加" not in page
+        assert len(page.splitlines()) <= 10
+    # aliases go to the same page; an unknown topic falls back to the command list
+    assert K.help_text("d") == K.help_text("菜") and K.help_text("loan") == K.help_text(
+        "借钱"
+    )
+    assert K.help_text("什么") == short
+    # the chat model still gets every rule
+    facts = market.knowledge(ev(clock, "kabu 怎么玩"))
+    assert "强制平仓" in facts["rules"] and "种土豆" in facts["rules"]
